@@ -10,17 +10,19 @@
 - ✅ **垃圾清理** - 自动删除小于指定大小的垃圾文章
 - ✅ **格式统一** - 按公众号分类记录，便于管理
 - ✅ **Markdown保存** - 将文章转换为 Markdown 格式保存
+- ✅ **Server酱推送** - 将最新文章推送到 Server酱（可汇总推送）
 - ✅ **灵活配置** - 所有参数可在配置文件中调整
 
 ## 项目结构
 
 ```
 WeChat-Article-Crawler/
-├── 爬取微信公众号文章.py    # 主程序
+├── wechat_crawler.py          # 主程序
 ├── config.json                 # 配置文件
-├── config说明.txt              # 配置说明
+├── accounts.json               # 公众号清单（可选）
 ├── gzh.txt                     # 公众号 fakeid 列表
 ├── 公众号名字                  # 公众号名称列表
+├── push_state.json             # 推送去重状态（自动生成）
 ├── wx_poc.txt                  # 文章记录日志
 ├── 公众号文章/                 # 文章保存目录
 │   ├── 公众号名1/
@@ -36,6 +38,7 @@ WeChat-Article-Crawler/
 
 ```bash
 pip install -r requirements.txt
+playwright install chromium
 ```
 
 ### 2. 配置参数
@@ -46,6 +49,9 @@ pip install -r requirements.txt
 {
     "token": "你的token",
     "cookie": "你的cookie",
+    "serverchan_sendkey": "你的SendKey（可选）",
+    "accounts_file": "accounts.json",
+    "push_state_file": "push_state.json",
     "min_file_size_kb": 3,
     "check_interval_minutes": 60,
     "retry_interval_minutes": 5
@@ -59,13 +65,59 @@ pip install -r requirements.txt
 在 `gzh.txt` 中添加公众号 fakeid，每行一个
 在 `公众号名字` 中添加对应的公众号名称，每行一个
 
+也可以使用 `accounts.json` 作为“公众号清单”（推荐，便于管理）：
+
+```json
+[
+  {"name": "顽主杯实盘大赛"},
+  {"name": "安静安全"},
+  {"name": "某公众号（可选）", "fakeid": ""}
+]
+```
+
 ### 4. 运行程序
 
 ```bash
-python 爬取微信公众号文章.py
+python wechat_crawler.py
 ```
 
 程序将自动开始监控，每隔指定时间检查一次更新。
+
+### 推送公众号清单的“最新文章”到 Server酱
+
+抓取清单里每个公众号的最新一篇文章，发生更新时推送（默认汇总为一条通知；标题旁带发布时间）：
+
+```bash
+python wechat_crawler.py --push-latest-all --accounts-file accounts.json
+```
+
+强制推送（忽略去重状态）：
+
+```bash
+python wechat_crawler.py --push-latest-all --force
+```
+
+## 自动运行（每天 8/12/16/20/24 点）
+
+本项目提供 Windows 计划任务安装脚本，会在每天以下时间自动运行：
+
+- 08:00
+- 12:00
+- 16:00
+- 20:00
+- 00:00（即你说的 24 点）
+
+安装/更新计划任务（会覆盖同名任务）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install_scheduled_task.ps1 -TaskName "WeChat-Article-Crawler" -AccountsFile .\accounts.json -RunMode push-latest-all -ServerChanSendKey "SCTxxxxxxxxxxxxxxxx" -RunLevel Limited
+```
+
+如果需要“最高权限运行”（可能需要管理员权限）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install_scheduled_task.ps1 -TaskName "WeChat-Article-Crawler" -AccountsFile .\accounts.json -RunMode push-latest-all -ServerChanSendKey "SCTxxxxxxxxxxxxxxxx" -RunLevel Highest
+```
 
 ## 配置说明
 
@@ -79,6 +131,28 @@ python 爬取微信公众号文章.py
 | check_interval_minutes | 可选 | 60 | 检查间隔（分钟），每隔多久检查一次更新 |
 | retry_interval_minutes | 可选 | 5 | 重试间隔（分钟），发生错误后等待多久重试 |
 
+### 读取指定公众号最新文章并提取指标
+
+在 `config.json` 里配置 `target_account_name`（或直接传 `--account`），然后运行：
+
+```bash
+python wechat_crawler.py --extract-latest --account "顽主杯实盘大赛"
+```
+
+如果你已经拿到文章链接，也可以直接解析该链接（不依赖后台 token/cookie）：
+
+```bash
+python wechat_crawler.py --article-url "https://mp.weixin.qq.com/s/xxxx" 
+```
+
+程序会输出一段 JSON，包含文章元信息与以下字段：
+
+- 短线亏钱效应
+- 当日人均亏损
+- 每日平均仓位
+- 今日市场打分
+- 顽主杯热榜
+
 ### 获取 Token 和 Cookie
 
 1. 登录 [微信公众平台](https://mp.weixin.qq.com/)
@@ -86,6 +160,25 @@ python 爬取微信公众号文章.py
 3. 切换到 Network 标签
 4. 刷新页面，找到任意请求
 5. 从请求头中复制 `token` 和 `cookie`
+
+### 使用 Playwright 自动更新 Token/Cookie
+
+适合 token/cookie 频繁过期、且希望脚本自动写回 `config.json` 的场景。
+
+1. 首次运行需要在弹出的浏览器里扫码登录一次；后续会复用 `--refresh-profile-dir` 指向的登录态目录。
+2. 运行后会更新 `config.json` 的 `token` 与 `cookie`，并额外写出 `wechat_params.json`（包含捕获到的 getmsg 参数等）。
+
+仅更新并退出：
+
+```bash
+python wechat_crawler.py --refresh-auth --refresh-auth-only
+```
+
+更新后直接拉取某公众号最新文章：
+
+```bash
+python wechat_crawler.py --refresh-auth --extract-latest --account "顽主杯实盘大赛"
+```
 
 ## 工作原理
 
