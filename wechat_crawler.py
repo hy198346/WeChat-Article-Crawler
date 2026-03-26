@@ -44,6 +44,44 @@ def load_account_names():
         names = [line.strip() for line in f if line.strip()]
     return {i: name for i, name in enumerate(names)}
 
+def update_accounts_json_from_names():
+    """
+    从公众号名字文件更新accounts.json文件
+    确保accounts.json总是包含最新的公众号名称
+    """
+    if not os.path.exists(ACCOUNT_NAMES_FILE):
+        return False
+    
+    # 从公众号名字文件读取最新的名称列表
+    with open(ACCOUNT_NAMES_FILE, "r", encoding="utf-8") as f:
+        names = [line.strip() for line in f if line.strip()]
+    
+    if not names:
+        return False
+    
+    # 读取现有的accounts.json文件
+    existing_accounts = []
+    if os.path.exists(ACCOUNTS_JSON_FILE):
+        existing_accounts = _load_accounts_from_json(ACCOUNTS_JSON_FILE)
+    
+    # 创建一个字典，用于快速查找现有的fakeid
+    existing_fakeids = {}
+    for acc in existing_accounts:
+        name = (acc.get("name") or acc.get("account") or "").strip()
+        fakeid = (acc.get("fakeid") or "").strip()
+        if name and fakeid:
+            existing_fakeids[name] = fakeid
+    
+    # 构建新的accounts列表
+    new_accounts = []
+    for name in names:
+        fakeid = existing_fakeids.get(name, "")
+        new_accounts.append({"name": name, "fakeid": fakeid})
+    
+    # 保存到accounts.json文件
+    save_json(ACCOUNTS_JSON_FILE, {"accounts": new_accounts})
+    return True
+
 def _format_publish_times(ts: int):
     try:
         t = int(ts or 0)
@@ -278,6 +316,9 @@ def _load_accounts_from_json(path: str):
     return []
 
 def load_accounts_list(config, accounts_file_override: str = None):
+    # 先从公众号名字文件更新accounts.json
+    update_accounts_json_from_names()
+    
     candidates = []
     if accounts_file_override:
         candidates.append(accounts_file_override)
@@ -423,6 +464,8 @@ def run_push_latest_all(
     push_result = None
     pushed_fakeids = set()
     if push and changed_articles:
+        # 按发布时间排序，最新的文章排在最前面
+        changed_articles.sort(key=lambda x: x.get("published_at", ""), reverse=True)
         if push_separately:
             results = []
             for a in changed_articles:
