@@ -90,7 +90,13 @@ async def refresh_wechat_auth(
         context = await p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
             headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=DownloadBubble,DownloadBubbleV2",
+                "--disable-download-notification",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
         )
 
         try:
@@ -183,7 +189,25 @@ async def refresh_wechat_auth(
             latest["cookie"] = _cookies_to_header(cookies)
 
         finally:
-            await context.close()
+            try:
+                # 先关闭所有页面，避免 explorer.exe 弹窗
+                pages = context.pages
+                for page in pages:
+                    try:
+                        # 移除事件监听避免回调问题
+                        page.remove_listener("request", handle_request)
+                        await page.close()
+                    except Exception:
+                        pass
+                await asyncio.sleep(1.0)
+                # 强制清理浏览器进程
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
 
     existing = _load_json(config_file)
     if latest["token"]:

@@ -1075,15 +1075,6 @@ def main():
         print("错误: config.json 中缺少 token 或 cookie")
         return
 
-    fakeids = load_fakeids()
-    if not fakeids:
-        print("错误: gzh.txt 为空或不存在")
-        return
-    print(f"加载了 {len(fakeids)} 个公众号")
-
-    account_names = load_account_names()
-    print(f"加载了 {len(account_names)} 个公众号名称")
-
     check_interval_minutes = config.get("check_interval_minutes", 60)
     check_interval_seconds = check_interval_minutes * 60
 
@@ -1092,6 +1083,16 @@ def main():
 
     while True:
         try:
+            # 每次循环重新读取公众号列表
+            fakeids = load_fakeids()
+            if not fakeids:
+                print("错误: gzh.txt 为空或不存在")
+                return
+            print(f"加载了 {len(fakeids)} 个公众号")
+
+            account_names = load_account_names()
+            print(f"加载了 {len(account_names)} 个公众号名称")
+
             print(f"\n{'='*60}")
             print(f"开始检查更新 - {time.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"{'='*60}\n")

@@ -7,7 +7,8 @@ param(
   [ValidateSet("push-latest-all","extract-latest","refresh-only")]
   [string]$RunMode = "push-latest-all",
   [string]$TargetUrl = "",
-  [string]$ServerChanSendKey = ""
+  [string]$ServerChanSendKey = "",
+  [switch]$NoForce
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,9 +20,31 @@ if ($ServerChanSendKey -ne "") {
 }
 
 if ($AccountsFile -eq "") {
-  $AccountsFile = ".\\accounts.json"
+  $AccountsFile = ".\accounts.json"
 }
 
-$headlessArg = $(if ($Headless) { "-Headless" } else { "" })
+# Build argument list
+$argList = @(
+  "-ProfileDir", $ProfileDir
+  "-MaxWait", $MaxWait
+  "-AccountsFile", $AccountsFile
+  "-RunMode", $RunMode
+)
 
-powershell -NoProfile -ExecutionPolicy Bypass -File .\run_project.ps1 -ProfileDir $ProfileDir $headlessArg -MaxWait $MaxWait -Account $Account -AccountsFile $AccountsFile -RunMode $RunMode -TargetUrl $TargetUrl
+if ($Headless) {
+  $argList += "-Headless"
+}
+
+if ($Account -ne "") {
+  $argList += @("-Account", $Account)
+}
+
+if ($TargetUrl -ne "") {
+  $argList += @("-TargetUrl", $TargetUrl)
+}
+
+if (-not $NoForce) {
+  $argList += "-Force"
+}
+
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_project.ps1 @argList

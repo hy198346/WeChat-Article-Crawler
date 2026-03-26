@@ -11,7 +11,8 @@ param(
   [switch]$PromptServerChan,
   [switch]$PauseOnError,
   [switch]$PauseOnFinish,
-  [string]$LogFile = ""
+  [string]$LogFile = "",
+  [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -86,8 +87,39 @@ function Invoke-PlaywrightInstallWithFallback {
   python -m playwright install chromium
 }
 
-Invoke-Step "Install Python deps" { Invoke-PipInstallWithFallback }
-Invoke-Step "Install Playwright Chromium" { Invoke-PlaywrightInstallWithFallback }
+$depsOk = $false
+$playwrightOk = $false
+
+try {
+  python -c "import playwright" 2>$null
+  if ($LASTEXITCODE -eq 0) { $playwrightOk = $true }
+} catch {}
+
+try {
+  $reqs = Get-Content "requirements.txt"
+  $missing = @()
+  foreach ($line in $reqs) {
+    $pkg = ($line -split '[=<>]')[0].Trim()
+    if ($pkg -eq "" -or $pkg.StartsWith("#")) { continue }
+    try {
+      python -c "import $pkg" 2>$null
+      if ($LASTEXITCODE -ne 0) { $missing += $pkg }
+    } catch { $missing += $pkg }
+  }
+  if ($missing.Count -eq 0) { $depsOk = $true }
+} catch {}
+
+if (-not $depsOk) {
+  Invoke-Step "Install Python deps (missing detected)" { Invoke-PipInstallWithFallback }
+} else {
+  Write-Host "[INFO] Python dependencies already installed." -ForegroundColor Green
+}
+
+if (-not $playwrightOk) {
+  Invoke-Step "Install Playwright Chromium (not detected)" { Invoke-PlaywrightInstallWithFallback }
+} else {
+  Write-Host "[INFO] Playwright Chromium already installed." -ForegroundColor Green
+}
 
 if ($Account -ne "") {
   $env:WECHAT_ACCOUNT = $Account
@@ -126,6 +158,8 @@ $env:WECHAT_PROFILE_DIR = $ProfileDir
 $env:WECHAT_REFRESH_MAX_WAIT = "$MaxWait"
 $env:WECHAT_HEADLESS = $(if ($Headless) { "1" } else { "0" })
 $env:WECHAT_RUN_MODE = $RunMode
+$env:WECHAT_SKIP_INSTALL = "1"  # PowerShell脚本已处理安装，跳过Python脚本中的安装
+$env:WECHAT_FORCE_PUSH = $(if ($Force) { "1" } else { "0" })
 
 Invoke-Step "Run project (refresh-auth + $RunMode)" { python bootstrap_refresh_auth.py }
 

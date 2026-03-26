@@ -192,7 +192,7 @@ def run_extract_latest(account: str) -> None:
         raise RuntimeError("抓取最新文章失败")
 
 
-def run_push_latest_all(accounts_file: str = "") -> None:
+def run_push_latest_all(accounts_file: str = "", force: bool = False) -> None:
     cmd = [
         sys.executable,
         "wechat_crawler.py",
@@ -201,9 +201,41 @@ def run_push_latest_all(accounts_file: str = "") -> None:
     ]
     if accounts_file:
         cmd.extend(["--accounts-file", accounts_file])
+    if force:
+        cmd.append("--force")
     res = _run_live(cmd)
     if res.code != 0:
         raise RuntimeError("抓取并推送公众号清单最新文章失败")
+
+
+def _check_pkg_installed(pkg: str) -> bool:
+    """检查Python包是否已安装"""
+    try:
+        __import__(pkg)
+        return True
+    except ImportError:
+        return False
+
+
+import re
+
+def _check_all_deps_installed(requirements_path: Path) -> bool:
+    """检查requirements.txt中的所有依赖是否已安装"""
+    try:
+        content = requirements_path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 提取包名（去除版本号）
+            pkg = re.split(r'[=<>!~]', line)[0].strip()
+            if not pkg:
+                continue
+            if not _check_pkg_installed(pkg):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def main() -> None:
@@ -216,6 +248,8 @@ def main() -> None:
     headless = os.environ.get("WECHAT_HEADLESS", "0") == "1"
     max_wait = int(os.environ.get("WECHAT_REFRESH_MAX_WAIT", "600"))
     run_mode = os.environ.get("WECHAT_RUN_MODE", "extract-latest").strip().lower()
+    skip_install = os.environ.get("WECHAT_SKIP_INSTALL", "0") == "1"
+    force_push = os.environ.get("WECHAT_FORCE_PUSH", "0") == "1"
     account = os.environ.get("WECHAT_ACCOUNT")
     accounts_file = os.environ.get("WECHAT_ACCOUNTS_FILE", "").strip()
     if not account:
@@ -232,11 +266,23 @@ def main() -> None:
     if run_mode == "extract-latest" and not account:
         raise RuntimeError("缺少公众号名称：设置 WECHAT_ACCOUNT 或在 config.json 里填 target_account_name")
 
-    print("step: pip install")
-    pip_install_with_fallback(requirements_path)
+    # 检查是否需要安装依赖
+    if skip_install:
+        print("[INFO] 跳过安装步骤 (WECHAT_SKIP_INSTALL=1)")
+    else:
+        # 检查Python依赖
+        if _check_all_deps_installed(requirements_path):
+            print("[INFO] Python依赖已安装，跳过pip install")
+        else:
+            print("step: pip install")
+            pip_install_with_fallback(requirements_path)
 
-    print("step: playwright install chromium")
-    playwright_install_chromium_with_fallback()
+        # 检查Playwright
+        if _check_pkg_installed("playwright"):
+            print("[INFO] Playwright已安装，跳过playwright install chromium")
+        else:
+            print("step: playwright install chromium")
+            playwright_install_chromium_with_fallback()
 
     print("step: refresh auth")
     run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
@@ -246,8 +292,8 @@ def main() -> None:
         run_extract_latest(account=account)
 
     if run_mode == "push-latest-all":
-        print("step: push latest all")
-        run_push_latest_all(accounts_file=accounts_file)
+        print("step: push latest all" + (" (force mode)" if force_push else ""))
+        run_push_latest_all(accounts_file=accounts_file, force=force_push)
 
     if run_mode == "refresh-only":
         return
