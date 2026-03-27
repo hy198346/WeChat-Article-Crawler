@@ -213,6 +213,8 @@ def fetch_article_markdown(article, headers, account_name=None):
     title = article.get("title")
     digest = article.get("digest", "")
     create_time = article.get("create_time")
+    
+    # 先尝试从 API 获取时间
     times = _format_publish_times(create_time)
     date_str = times["date"]
     published_at = times["published_at"]
@@ -220,6 +222,108 @@ def fetch_article_markdown(article, headers, account_name=None):
     resp = requests.get(url, headers=headers)
     resp.encoding = "utf-8"
     content_html = resp.text
+
+    # 如果 API 没有返回时间，尝试从 HTML 中提取
+    if date_str == "Unknown" and published_at == "Unknown":
+        print(f"开始从 HTML 中提取时间: {url}")
+        # 1. 尝试从脚本标签中提取时间戳（如 "publish_time":1774580390）
+        # 使用更灵活的正则表达式，匹配各种可能的格式
+        timestamp_patterns = [
+            r'publish_time\s*[:=]\s*(\d+)',  # publish_time: 1234567890 或 publish_time=1234567890
+            r'"publish_time"\s*:\s*(\d+)',  # "publish_time": 1234567890
+            r'\'publish_time\'\s*:\s*(\d+)',  # 'publish_time': 1234567890
+            r'date\s*[:=]\s*(\d+)',  # date: 1234567890 或 date=1234567890
+            r'"date"\s*:\s*(\d+)',  # "date": 1234567890
+            r'\'date\'\s*:\s*(\d+)',  # 'date': 1234567890
+        ]
+        
+        timestamp_found = False
+        for pattern in timestamp_patterns:
+            timestamp_match = re.search(pattern, content_html)
+            if timestamp_match:
+                try:
+                    timestamp = int(timestamp_match.group(1))
+                    print(f"找到时间戳: {timestamp} (匹配模式: {pattern})")
+                    times = _format_publish_times(timestamp)
+                    date_str = times["date"]
+                    published_at = times["published_at"]
+                    print(f"解析时间成功: {published_at}")
+                    timestamp_found = True
+                    break
+                except Exception as e:
+                    print(f"解析时间戳失败: {e}")
+                    continue
+        
+        # 如果没有找到时间戳，尝试查找日期字符串
+        if not timestamp_found:
+            print("未找到时间戳，尝试查找日期字符串")
+            # 尝试匹配常见的日期格式
+            date_patterns = [
+                r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}',  # 2023-01-01 12:34
+                r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}',  # 2023/01/01 12:34
+                r'\d{4}年\d{2}月\d{2}日\s+\d{2}:\d{2}',  # 2023年01月01日 12:34
+                r'\d{4}-\d{2}-\d{2}',  # 2023-01-01
+                r'\d{4}/\d{2}/\d{2}',  # 2023/01/01
+                r'\d{4}年\d{2}月\d{2}日',  # 2023年01月01日
+            ]
+            
+            for pattern in date_patterns:
+                date_match = re.search(pattern, content_html)
+                if date_match:
+                    try:
+                        date_str = date_match.group(0)
+                        print(f"找到日期字符串: {date_str} (匹配模式: {pattern})")
+                        # 尝试解析日期字符串
+                        for fmt in [
+                            '%Y-%m-%d %H:%M',
+                            '%Y/%m/%d %H:%M',
+                            '%Y年%m月%d日 %H:%M',
+                            '%Y-%m-%d',
+                            '%Y/%m/%d',
+                            '%Y年%m月%d日',
+                        ]:
+                            try:
+                                time_obj = time.strptime(date_str, fmt)
+                                timestamp = time.mktime(time_obj)
+                                times = _format_publish_times(int(timestamp))
+                                date_str = times["date"]
+                                published_at = times["published_at"]
+                                print(f"解析日期成功: {published_at}")
+                                break
+                            except ValueError:
+                                continue
+                        break
+                    except Exception as e:
+                        print(f"解析日期失败: {e}")
+                        continue
+        
+        # 3. 如果仍然没有提取到时间，尝试从URL中提取（某些公众号会在URL中包含时间）
+        if date_str == "Unknown" and published_at == "Unknown":
+            print("未找到日期字符串，尝试从URL中提取时间")
+            url_time_pattern = r'\d{8}'  # 匹配URL中的8位数字日期
+            url_match = re.search(url_time_pattern, url)
+            if url_match:
+                try:
+                    date_str = url_match.group(0)
+                    print(f"从URL中找到日期: {date_str}")
+                    time_obj = time.strptime(date_str, '%Y%m%d')
+                    timestamp = time.mktime(time_obj)
+                    times = _format_publish_times(int(timestamp))
+                    date_str = times["date"]
+                    published_at = times["published_at"]
+                    print(f"解析URL日期成功: {published_at}")
+                except Exception as e:
+                    print(f"解析URL日期失败: {e}")
+                    pass
+        
+        # 4. 如果所有方法都失败，使用当前日期作为默认值
+        if date_str == "Unknown" and published_at == "Unknown":
+            print("所有时间提取方法都失败，使用当前日期")
+            current_time = int(time.time())
+            times = _format_publish_times(current_time)
+            date_str = times["date"]
+            published_at = times["published_at"]
+            print(f"使用当前日期: {published_at}")
 
     folder_name = account_name if account_name else "Unknown_Account"
     if folder_name == "Unknown_Account":
@@ -364,20 +468,42 @@ def _extract_latest_payload_for_account(fakeid: str, account_name: str, token: s
         return None
 
     inferred_account = (account_name or "").strip()
-    if not inferred_account:
-        try:
-            fetched = fetch_article_markdown(chosen, headers, account_name=None)
-            inferred_account = (fetched.get("account") or "").strip()
-        except Exception:
-            inferred_account = ""
-
+    # 先尝试从 API 获取时间
     times = _format_publish_times(chosen.get("create_time"))
+    date_str = times["date"]
+    published_at = times["published_at"]
+    
+    # 如果 API 没有返回时间，尝试从 HTML 中提取
+    if date_str == "Unknown" and published_at == "Unknown":
+        try:
+            print(f"尝试从 HTML 中提取时间和账号名称: {inferred_account or 'Unknown'}")
+            fetched = fetch_article_markdown(chosen, headers, account_name=inferred_account)
+            if fetched:
+                inferred_account = (fetched.get("account") or inferred_account).strip()
+                # 使用 fetch_article_markdown 提取的时间
+                date_str = fetched.get("date", "Unknown")
+                published_at = fetched.get("published_at", "Unknown")
+                print(f"成功提取时间: {published_at}")
+        except Exception as e:
+            print(f"从 HTML 提取时间失败: {e}")
+            # 保留原始的账号名称
+            pass
+    else:
+        # API 返回了时间，只提取账号名称
+        if not inferred_account:
+            try:
+                fetched = fetch_article_markdown(chosen, headers, account_name=None)
+                inferred_account = (fetched.get("account") or "").strip()
+            except Exception:
+                # 保留空的账号名称
+                pass
+
     return {
-        "account": inferred_account,
+        "account": inferred_account or account_name or "Unknown_Account",
         "fakeid": fakeid,
         "title": chosen.get("title") or "(无标题)",
-        "date": times["date"],
-        "published_at": times["published_at"],
+        "date": date_str,
+        "published_at": published_at,
         "url": chosen.get("link") or "",
         "_raw_article": chosen,
     }
@@ -684,6 +810,7 @@ def save_url_to_md(article, headers, account_name=None):
     title = article.get("title")
     digest = article.get("digest", "")
     
+    # 先尝试从 API 获取时间
     times = _format_publish_times(article.get("create_time"))
     date_str = times["date"]
     published_at = times["published_at"]
@@ -696,6 +823,95 @@ def save_url_to_md(article, headers, account_name=None):
         resp = requests.get(url, headers=headers)
         resp.encoding = "utf-8"
         content_html = resp.text
+        
+        # 如果 API 没有返回时间，尝试从 HTML 中提取
+        if date_str == "Unknown" and published_at == "Unknown":
+            # 1. 尝试从脚本标签中提取时间戳（如 "publish_time":1774580390）
+            timestamp_pattern = r'"publish_time"\s*:\s*(\d+)'  # 匹配时间戳格式
+            timestamp_match = re.search(timestamp_pattern, content_html)
+            if timestamp_match:
+                try:
+                    timestamp = int(timestamp_match.group(1))
+                    times = _format_publish_times(timestamp)
+                    date_str = times["date"]
+                    published_at = times["published_at"]
+                except Exception:
+                    pass
+            
+            # 2. 如果没有找到时间戳，尝试其他格式
+            if date_str == "Unknown" and published_at == "Unknown":
+                # 匹配多种时间格式
+                time_patterns = [
+                    # 直接的发布时间变量
+                    r'publish_time\s*=\s*["\']([^"\']+)["\']',
+                    r'var\s+publish_time\s*=\s*["\']([^"\']+)["\']',
+                    r'date\s*=\s*["\']([^"\']+)["\']',
+                    r'var\s+date\s*=\s*["\']([^"\']+)["\']',
+                    
+                    # 富媒体元数据中的时间
+                    r'<span[^>]*class=["\']rich_media_meta[^>]*["\']>([^<]+)</span>',
+                    r'<span[^>]*class=["\']publish_time[^>]*["\']>([^<]+)</span>',
+                    r'<span[^>]*class=["\']time[^>]*["\']>([^<]+)</span>',
+                    
+                    # 各种时间格式
+                    r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}',  # 2023-01-01 12:34
+                    r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}',  # 2023/01/01 12:34
+                    r'\d{4}年\d{2}月\d{2}日\s+\d{2}:\d{2}',  # 2023年01月01日 12:34
+                    r'\d{2}月\d{2}日\s+\d{2}:\d{2}',  # 01月01日 12:34
+                    r'\d{4}-\d{2}-\d{2}',  # 2023-01-01
+                    r'\d{4}/\d{2}/\d{2}',  # 2023/01/01
+                    r'\d{4}年\d{2}月\d{2}日',  # 2023年01月01日
+                ]
+                
+                for pattern in time_patterns:
+                    match = re.search(pattern, content_html)
+                    if match:
+                        time_str = match.group(1).strip()
+                        # 尝试解析时间字符串
+                        try:
+                            # 尝试不同的时间格式
+                            for fmt in [
+                                '%Y-%m-%d %H:%M',
+                                '%Y/%m/%d %H:%M',
+                                '%Y年%m月%d日 %H:%M',
+                                '%Y-%m-%d',
+                                '%Y/%m/%d',
+                                '%Y年%m月%d日',
+                                '%m月%d日 %H:%M',  # 处理没有年份的情况，使用当前年份
+                            ]:
+                                try:
+                                    if fmt == '%m月%d日 %H:%M':
+                                        # 没有年份，使用当前年份
+                                        current_year = time.strftime('%Y')
+                                        full_time_str = f'{current_year}年{time_str}'
+                                        time_obj = time.strptime(full_time_str, '%Y年%m月%d日 %H:%M')
+                                    else:
+                                        time_obj = time.strptime(time_str, fmt)
+                                    timestamp = time.mktime(time_obj)
+                                    times = _format_publish_times(int(timestamp))
+                                    date_str = times["date"]
+                                    published_at = times["published_at"]
+                                    break
+                                except ValueError:
+                                    continue
+                            break
+                        except Exception:
+                            continue
+                
+                # 3. 如果仍然没有提取到时间，尝试从URL中提取（某些公众号会在URL中包含时间）
+                if date_str == "Unknown" and published_at == "Unknown":
+                    url_time_pattern = r'\d{8}'  # 匹配URL中的8位数字日期
+                    url_match = re.search(url_time_pattern, url)
+                    if url_match:
+                        date_str = url_match.group(0)
+                        try:
+                            time_obj = time.strptime(date_str, '%Y%m%d')
+                            timestamp = time.mktime(time_obj)
+                            times = _format_publish_times(int(timestamp))
+                            date_str = times["date"]
+                            published_at = times["published_at"]
+                        except Exception:
+                            pass
         
         # Use provided account name or try to extract from HTML
         folder_name = account_name if account_name else "Unknown_Account"
