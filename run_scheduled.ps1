@@ -47,4 +47,6 @@ if (-not $NoForce) {
   $argList += "-Force"
 }
 
-powershell -NoProfile -ExecutionPolicy Bypass -File .\run_project.ps1 @argList
+# 直接执行 run_project.ps1 脚本
+$runProjectPath = Join-Path $PSScriptRoot "run_project.ps1"
+& "$PSHOME\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$runProjectPath" @argList

@@ -32,15 +32,15 @@ Write-Host "[INFO] Run level: $RunLevel" -ForegroundColor Green
 Write-Host ""
 
 $pwsh = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-$scriptPath = Join-Path $PSScriptRoot "run_scheduled.ps1"
+$scriptPath = Join-Path $PSScriptRoot "run_project.ps1"
 
 Write-Host "[INFO] PowerShell executable: $pwsh" -ForegroundColor Green
 Write-Host "[INFO] Scheduled task script: $scriptPath" -ForegroundColor Green
 
 if (-not (Test-Path $scriptPath)) {
-  throw "run_scheduled.ps1 not found: $scriptPath"
+  throw "run_project.ps1 not found: $scriptPath"
 }
-Write-Host "[INFO] run_scheduled.ps1 exists." -ForegroundColor Green
+Write-Host "[INFO] run_project.ps1 exists." -ForegroundColor Green
 
 # 使用 $argList 代替 $args 避免与 PowerShell 内置变量冲突
 $argList = @(
@@ -50,7 +50,8 @@ $argList = @(
   "-ProfileDir", "`"$ProfileDir`"",
   "-MaxWait", "$MaxWait",
   "-AccountsFile", "`"$AccountsFile`"",
-  "-RunMode", "$RunMode"
+  "-RunMode", "$RunMode",
+  "-Force"
 )
 
 if ($Headless) { $argList += "-Headless" }
