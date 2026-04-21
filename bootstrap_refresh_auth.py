@@ -284,8 +284,22 @@ def main() -> None:
             print("step: playwright install chromium")
             playwright_install_chromium_with_fallback()
 
-    print("step: refresh auth")
-    run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
+    # 判断是否需要刷新 token
+    need_refresh = True
+    cfg_path = root / "config.json"
+    if headless and run_mode != "refresh-only" and cfg_path.exists():
+        try:
+            import json
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8")) or {}
+            if cfg.get("token") and cfg.get("cookie"):
+                need_refresh = False
+                print(f"[INFO] headless 模式且已有有效 token，跳过刷新（上一次: {cfg_path.stat().st_mtime_fmt if hasattr(cfg_path.stat(), 'st_mtime_fmt') else ''}）")
+        except Exception:
+            pass
+
+    if need_refresh:
+        print("step: refresh auth")
+        run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
 
     if run_mode == "extract-latest":
         print("step: extract latest")

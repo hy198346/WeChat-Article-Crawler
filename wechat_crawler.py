@@ -17,6 +17,26 @@ ARTICLES_BASE_DIR = "公众号文章"
 ACCOUNTS_JSON_FILE = "accounts.json"
 PUSH_STATE_FILE = "push_state.json"
 
+def _parse_grouped_account_names(text: str):
+    group = "未分组"
+    out = []
+    for raw in (text or "").splitlines():
+        s = (raw or "").strip()
+        if not s:
+            continue
+        m = re.match(r"^(.+?公众号)\s*[:：]\s*$", s)
+        if m:
+            group = m.group(1).strip() or group
+            continue
+        out.append({"name": s, "group": group})
+    return out
+
+def _load_grouped_account_names_from_file():
+    if not os.path.exists(ACCOUNT_NAMES_FILE):
+        return []
+    with open(ACCOUNT_NAMES_FILE, "r", encoding="utf-8") as f:
+        return _parse_grouped_account_names(f.read())
+
 def load_json(filepath):
     if os.path.exists(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
@@ -40,8 +60,8 @@ def load_fakeids():
 def load_account_names():
     if not os.path.exists(ACCOUNT_NAMES_FILE):
         return {}
-    with open(ACCOUNT_NAMES_FILE, "r", encoding="utf-8") as f:
-        names = [line.strip() for line in f if line.strip()]
+    items = _load_grouped_account_names_from_file()
+    names = [it.get("name") for it in items if (it.get("name") or "").strip()]
     return {i: name for i, name in enumerate(names)}
 
 def update_accounts_json_from_names():
@@ -53,8 +73,9 @@ def update_accounts_json_from_names():
         return False
     
     # 从公众号名字文件读取最新的名称列表
-    with open(ACCOUNT_NAMES_FILE, "r", encoding="utf-8") as f:
-        names = [line.strip() for line in f if line.strip()]
+    items = _load_grouped_account_names_from_file()
+    names = [(it.get("name") or "").strip() for it in items if (it.get("name") or "").strip()]
+    group_by_name = {(it.get("name") or "").strip(): (it.get("group") or "未分组").strip() for it in items if (it.get("name") or "").strip()}
     
     if not names:
         return False
@@ -64,19 +85,32 @@ def update_accounts_json_from_names():
     if os.path.exists(ACCOUNTS_JSON_FILE):
         existing_accounts = _load_accounts_from_json(ACCOUNTS_JSON_FILE)
     
-    # 创建一个字典，用于快速查找现有的fakeid
-    existing_fakeids = {}
+    # 创建一个字典，用于快速查找现有账号信息（保留 fakeid 以及其他扩展字段）
+    existing_by_name = {}
     for acc in existing_accounts:
+        if not isinstance(acc, dict):
+            continue
         name = (acc.get("name") or acc.get("account") or "").strip()
-        fakeid = (acc.get("fakeid") or "").strip()
-        if name and fakeid:
-            existing_fakeids[name] = fakeid
+        if not name:
+            continue
+        existing_by_name[name] = acc
     
     # 构建新的accounts列表
     new_accounts = []
     for name in names:
-        fakeid = existing_fakeids.get(name, "")
-        new_accounts.append({"name": name, "fakeid": fakeid})
+        old = existing_by_name.get(name, {}) if isinstance(existing_by_name.get(name), dict) else {}
+        fakeid = (old.get("fakeid") or "").strip()
+        group_new = (group_by_name.get(name, "未分组") or "未分组").strip()
+        group_old = (old.get("group") or "").strip()
+        group = group_old if (group_new == "未分组" and group_old and group_old != "未分组") else group_new
+
+        item = {"name": name, "fakeid": fakeid, "group": group}
+        skip_keys = set(item.keys()) | {"account"}
+        for k, v in old.items():
+            if k in skip_keys:
+                continue
+            item[k] = v
+        new_accounts.append(item)
     
     # 保存到accounts.json文件
     save_json(ACCOUNTS_JSON_FILE, {"accounts": new_accounts})
@@ -440,9 +474,16 @@ def load_accounts_list(config, accounts_file_override: str = None):
                     continue
                 name = (it.get("name") or it.get("account") or "").strip()
                 fakeid = (it.get("fakeid") or "").strip()
+                latest_url = (it.get("latest_url") or it.get("article_url") or "").strip()
+                group = (it.get("group") or "").strip()
                 if not name and not fakeid:
                     continue
-                out.append({"name": name, "fakeid": fakeid})
+                obj = {"name": name, "fakeid": fakeid}
+                if group:
+                    obj["group"] = group
+                if latest_url:
+                    obj["latest_url"] = latest_url
+                out.append(obj)
             if out:
                 return out
 
@@ -510,17 +551,33 @@ def _extract_latest_payload_for_account(fakeid: str, account_name: str, token: s
 
 def build_serverchan_markdown_articles(articles):
     lines = []
+    groups = {}
+    group_rank = {}
     for a in articles:
-        account = a.get("account") or ""
-        title = a.get("title") or "(无标题)"
-        published_at = a.get("published_at") or a.get("date") or ""
-        url = a.get("url") or ""
-        label = f"{account} [{published_at}] {title}".strip()
-        if url:
-            lines.append(f"- [{label}]({url})")
-        else:
-            lines.append(f"- {label}")
-    return "\n".join(lines)
+        g = (a.get("group") or "未分组").strip()
+        if g not in groups:
+            groups[g] = []
+            group_rank[g] = len(group_rank)
+        groups[g].append(a)
+
+    for g in groups:
+        groups[g].sort(key=lambda x: x.get("published_at") or x.get("date") or "", reverse=True)
+
+    for g in sorted(groups.keys(), key=lambda x: group_rank.get(x, 999)):
+        lines.append(f"### {g}")
+        for a in groups[g]:
+            account = a.get("account") or ""
+            title = a.get("title") or "(无标题)"
+            published_at = a.get("published_at") or a.get("date") or ""
+            url = a.get("url") or ""
+            label = f"{account} [{published_at}] {title}".strip()
+            if url:
+                lines.append(f"- [{label}]({url})")
+            else:
+                lines.append(f"- {label}")
+        lines.append("")
+
+    return "\n".join([l for l in lines if l is not None]).rstrip()
 
 def push_articles_to_serverchan(config, articles, override_sendkey=None):
     sendkey = _get_serverchan_sendkey(config, override_sendkey=override_sendkey)
@@ -557,13 +614,52 @@ def run_push_latest_all(
 
     changed_articles = []
     per_account_payloads = []
+    group_rank = {}
+    for it in accounts:
+        g = (it.get("group") or "未分组").strip()
+        if g not in group_rank:
+            group_rank[g] = len(group_rank)
 
     for it in accounts:
         name = (it.get("name") or "").strip()
         fakeid = (it.get("fakeid") or "").strip()
-        if not fakeid:
+        latest_url = (it.get("latest_url") or "").strip()
+        group = (it.get("group") or "未分组").strip()
+        if latest_url:
+            fakeid = ""
+        elif not fakeid:
             fakeid = resolve_fakeid(name, token, cookie, target_fakeid=None)
         if not fakeid:
+            if latest_url:
+                state_key = f"name:{name}" if name else f"url:{latest_url}"
+                headers_public = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
+                fetched = fetch_article_markdown(
+                    {"title": "Unknown", "link": latest_url, "create_time": 0, "digest": "", "author": ""},
+                    headers_public,
+                    account_name=name or None,
+                )
+                url = fetched.get("url") or latest_url
+                last = state.get(state_key, {}) if isinstance(state.get(state_key), dict) else {}
+                last_url = last.get("last_pushed_url")
+                if (not force) and last_url and last_url == url:
+                    continue
+                changed_articles.append(
+                    {
+                        "account": fetched.get("account") or name or "Unknown_Account",
+                        "title": fetched.get("title") or "(无标题)",
+                        "date": fetched.get("date", "Unknown"),
+                        "published_at": fetched.get("published_at", fetched.get("date", "Unknown")),
+                        "url": url,
+                        "fakeid": state_key,
+                        "group": group,
+                    }
+                )
+                per_account_payloads.append({"account": name, "fakeid": state_key, "url": url})
+                continue
+
             print(f"[Skip] 无法解析 fakeid：{name}")
             continue
 
@@ -584,14 +680,24 @@ def run_push_latest_all(
             "published_at": payload["published_at"],
             "url": payload["url"],
             "fakeid": fakeid,
+            "group": group,
         })
         per_account_payloads.append(payload)
+
+    if changed_articles:
+        grouped = {}
+        for a in changed_articles:
+            g = (a.get("group") or "未分组").strip()
+            grouped.setdefault(g, []).append(a)
+        ordered = []
+        for g in sorted(grouped.keys(), key=lambda x: group_rank.get(x, 999)):
+            grouped[g].sort(key=lambda x: x.get("published_at") or x.get("date") or "", reverse=True)
+            ordered.extend(grouped[g])
+        changed_articles = ordered
 
     push_result = None
     pushed_fakeids = set()
     if push and changed_articles:
-        # 按发布时间排序，最新的文章排在最前面
-        changed_articles.sort(key=lambda x: x.get("published_at", ""), reverse=True)
         if push_separately:
             results = []
             for a in changed_articles:
