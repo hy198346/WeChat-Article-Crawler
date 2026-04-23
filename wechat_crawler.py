@@ -1344,6 +1344,10 @@ def main():
     parser.add_argument("--refresh-headless", action="store_true")
     parser.add_argument("--refresh-target-url", type=str, default=None)
     parser.add_argument("--refresh-max-wait", type=int, default=90)
+    parser.add_argument("--refresh-debug-dir", type=str, default=None)
+    parser.add_argument("--refresh-keep-open-on-fail", action="store_true")
+    parser.add_argument("--refresh-keep-open", action="store_true")
+    parser.add_argument("--refresh-keep-open-seconds", type=int, default=120)
     parser.add_argument("--extract-latest", action="store_true")
     parser.add_argument("--push-latest-all", action="store_true")
     parser.add_argument("--article-url", type=str, default=None)
@@ -1382,11 +1386,26 @@ def main():
                     headless=args.refresh_headless,
                     target_url=args.refresh_target_url,
                     max_wait_seconds=args.refresh_max_wait,
+                    debug_dir=args.refresh_debug_dir,
+                    keep_open_on_fail=args.refresh_keep_open_on_fail,
+                    keep_open=args.refresh_keep_open,
+                    keep_open_seconds=args.refresh_keep_open_seconds,
                 )
             )
             config = load_json(CONFIG_FILE)
         except Exception as e:
             print(f"错误: 自动更新 token/cookie 失败: {e}")
+            try:
+                import traceback
+                traceback.print_exc()
+            except Exception:
+                pass
+            if args.refresh_keep_open_on_fail and (not args.refresh_headless):
+                try:
+                    print(f"将等待 {args.refresh_keep_open_seconds} 秒再退出，便于查看/扫码")
+                    time.sleep(max(1, int(args.refresh_keep_open_seconds)))
+                except Exception:
+                    pass
             sys.exit(1)
 
         token = config.get("token")

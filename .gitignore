@@ -8,6 +8,8 @@ history.json
 wx_poc.txt
 公众号文章/
 my_wechat_profile/
+my_wechat_profile_qr/
+debug_refresh_auth/
 logs/
 .vendor/
 *.log
