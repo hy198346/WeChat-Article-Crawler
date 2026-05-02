@@ -13,3 +13,6 @@ debug_refresh_auth/
 logs/
 .vendor/
 *.log
+.env
+.env.*
+!.env.example

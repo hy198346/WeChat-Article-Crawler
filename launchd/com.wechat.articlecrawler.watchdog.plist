@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.wechat.articlecrawler.watchdog</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/chenwangqian/trae/WeChat-Article-Crawler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/bin/python3</string>
+      <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/watchdog.py</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>600</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/logs/launchd.watchdog.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/logs/launchd.watchdog.err.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+  </dict>
+</plist>

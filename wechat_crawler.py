@@ -6,6 +6,8 @@ import re
 import argparse
 import asyncio
 import sys
+import hashlib
+from pathlib import Path
 
 # 配置和数据文件路径
 CONFIG_FILE = "config.json"
@@ -16,6 +18,33 @@ OUTPUT_FILE = "wx_poc.txt"
 ARTICLES_BASE_DIR = "公众号文章"
 ACCOUNTS_JSON_FILE = "accounts.json"
 PUSH_STATE_FILE = "push_state.json"
+
+def _ts_now():
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+def _emit_auth_expired(reason: str, detail: str = ""):
+    msg = f"[{_ts_now()}] WECHAT_AUTH_EXPIRED reason={reason}"
+    if detail:
+        msg += f" detail={detail}"
+    print(msg)
+
+def _looks_like_wechat_login_html(text: str) -> bool:
+    if not text:
+        return False
+    if "使用微信扫一扫" in text:
+        return True
+    if "扫码登录" in text:
+        return True
+    if "微信公众平台" in text and ("登录" in text or "安全验证" in text):
+        return True
+    s = text.lower()
+    if "mp.weixin.qq.com/cgi-bin/login" in s:
+        return True
+    if "cgi-bin/login" in s and "mp.weixin.qq.com" in s:
+        return True
+    if "js_login" in s and "mp.weixin" in s:
+        return True
+    return False
 
 def _parse_grouped_account_names(text: str):
     group = "未分组"
@@ -161,10 +190,31 @@ def get_articles(fakeid, token, cookie, begin=0, count=5):
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
-        data = response.json()
+        ct = (response.headers.get("Content-Type") or "").lower()
+        if "application/json" not in ct:
+            body = response.text or ""
+            if _looks_like_wechat_login_html(body):
+                _emit_auth_expired("non_json_login_page", f"status={response.status_code} content_type={ct}")
+                return [], 0, "auth_expired"
+        try:
+            data = response.json()
+        except Exception as e:
+            body = response.text or ""
+            if _looks_like_wechat_login_html(body):
+                _emit_auth_expired("json_decode_login_page", str(e))
+                return [], 0, "auth_expired"
+            print(f"请求失败: {e}")
+            return [], 0, None
         
         if "base_resp" in data and data["base_resp"]["ret"] != 0:
-            print(f"API Error: {data['base_resp']}")
+            base = data["base_resp"] or {}
+            err_msg = str(base.get("err_msg") or "").lower()
+            if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
+                try:
+                    _emit_auth_expired("base_resp_invalid_session", json.dumps(base, ensure_ascii=False))
+                except Exception:
+                    _emit_auth_expired("base_resp_invalid_session")
+            print(f"API Error: {base}")
             return [], 0, None
         
         # publish_page 是一个 JSON 字符串，需要再次解析
@@ -213,9 +263,30 @@ def search_accounts(query, token, cookie, begin=0, count=5):
     try:
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
-        data = response.json()
+        ct = (response.headers.get("Content-Type") or "").lower()
+        if "application/json" not in ct:
+            body = response.text or ""
+            if _looks_like_wechat_login_html(body):
+                _emit_auth_expired("non_json_login_page_searchbiz", f"status={response.status_code} content_type={ct}")
+                return []
+        try:
+            data = response.json()
+        except Exception as e:
+            body = response.text or ""
+            if _looks_like_wechat_login_html(body):
+                _emit_auth_expired("json_decode_login_page_searchbiz", str(e))
+                return []
+            print(f"搜索公众号失败: {e}")
+            return []
         if "base_resp" in data and data["base_resp"].get("ret", 0) != 0:
-            print(f"API Error: {data['base_resp']}")
+            base = data["base_resp"] or {}
+            err_msg = str(base.get("err_msg") or "").lower()
+            if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
+                try:
+                    _emit_auth_expired("base_resp_invalid_session_searchbiz", json.dumps(base, ensure_ascii=False))
+                except Exception:
+                    _emit_auth_expired("base_resp_invalid_session_searchbiz")
+            print(f"API Error: {base}")
             return []
         return data.get("list", [])
     except Exception as e:
@@ -400,6 +471,24 @@ def _get_serverchan_sendkey(config, override_sendkey=None):
     env_key = os.environ.get("SERVERCHAN_SENDKEY")
     if env_key:
         return env_key.strip()
+    try:
+        env_file = os.environ.get("WECHAT_ENV_FILE")
+        if not env_file:
+            env_file = str((Path(__file__).resolve().parent / ".env"))
+        p = Path(env_file)
+        if p.exists():
+            for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() != "SERVERCHAN_SENDKEY":
+                    continue
+                val = v.strip().strip("'").strip('"').strip()
+                if val:
+                    return val
+    except Exception:
+        pass
     if isinstance(config, dict):
         k = config.get("serverchan_sendkey")
         if k:
@@ -420,6 +509,54 @@ def send_serverchan_message(sendkey, title, desp, timeout=20):
         return {"ok": True, "response": data}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+def _default_cache_dir() -> Path:
+    home = Path.home()
+    if sys.platform == "darwin":
+        base = Path(os.environ.get("XDG_CACHE_HOME") or (home / "Library" / "Caches"))
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME") or (home / ".cache"))
+    return base / "WeChat-Article-Crawler"
+
+def send_serverchan_message_once(
+    sendkey,
+    title,
+    desp,
+    dedupe_key: str,
+    ttl_seconds: int = 6 * 3600,
+    timeout: int = 20,
+    state_dir: str = None,
+):
+    if not dedupe_key:
+        return send_serverchan_message(sendkey, title, desp, timeout=timeout)
+    base_dir = Path(state_dir) if state_dir else _default_cache_dir()
+    try:
+        base_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    h = hashlib.sha1(dedupe_key.encode("utf-8")).hexdigest()
+    stamp = base_dir / f"serverchan_once_{h}.stamp"
+    now = time.time()
+    try:
+        if stamp.exists():
+            age = now - stamp.stat().st_mtime
+            if age < max(0, int(ttl_seconds)):
+                return {"ok": True, "skipped": True, "reason": "throttled", "age_seconds": age, "dedupe_key": dedupe_key}
+    except Exception:
+        pass
+    try:
+        stamp.write_text(str(int(now)), encoding="utf-8")
+    except Exception:
+        try:
+            stamp.touch()
+        except Exception:
+            pass
+    res = send_serverchan_message(sendkey, title, desp, timeout=timeout)
+    try:
+        res["dedupe_key"] = dedupe_key
+    except Exception:
+        pass
+    return res
 
 def build_serverchan_markdown(article_info):
     title = article_info.get("title") or "(无标题)"

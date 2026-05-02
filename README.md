@@ -119,6 +119,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install_scheduled_task.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install_scheduled_task.ps1 -TaskName "WeChat-Article-Crawler" -AccountsFile .\accounts.json -RunMode push-latest-all -ServerChanSendKey "SCTxxxxxxxxxxxxxxxx" -RunLevel Highest
 ```
 
+## macOS：launchd 定时任务 + Watchdog
+
+项目内置了两份 launchd 配置（见 `launchd/`），用于：
+
+- 主任务：`com.wechat.articlecrawler.runproject`（按固定时刻运行 `run_project_launchd.sh`）
+- Watchdog：`com.wechat.articlecrawler.watchdog`（每 10 分钟运行一次 `watchdog.py`，检查系统/任务状态，并在异常时自动修复 + Server酱告警）
+
+安装方式（以当前用户 LaunchAgent 为例）：
+
+1. 将 `launchd/*.plist` 复制到 `~/Library/LaunchAgents/`（并把 plist 里的绝对路径改成你本机的项目路径）。
+2. 加载主任务与 watchdog：
+
+```bash
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.runproject.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.watchdog.plist
+```
+
+3. 查看状态/日志：
+
+- 状态：`launchctl print "gui/$(id -u)/com.wechat.articlecrawler.runproject"` / `...watchdog`
+- 日志：`logs/launchd.run_project.*.log`、`logs/launchd.watchdog.*.log`、`logs/run_project_launchd.last.log`
+
+Watchdog 的可选环境变量在 `.env.example` 里（默认会自动读取根目录 `.env`）。需要告警时，配置 `SERVERCHAN_SENDKEY` 即可。
+
 ## 配置说明
 
 ### 配置项

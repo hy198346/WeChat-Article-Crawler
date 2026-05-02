@@ -250,6 +250,7 @@ def main() -> None:
     run_mode = os.environ.get("WECHAT_RUN_MODE", "extract-latest").strip().lower()
     skip_install = os.environ.get("WECHAT_SKIP_INSTALL", "0") == "1"
     force_push = os.environ.get("WECHAT_FORCE_PUSH", "0") == "1"
+    force_refresh = os.environ.get("WECHAT_FORCE_REFRESH", "0") == "1"
     account = os.environ.get("WECHAT_ACCOUNT")
     accounts_file = os.environ.get("WECHAT_ACCOUNTS_FILE", "").strip()
     if not account:
@@ -287,7 +288,10 @@ def main() -> None:
     # 判断是否需要刷新 token
     need_refresh = True
     cfg_path = root / "config.json"
-    if headless and run_mode != "refresh-only" and cfg_path.exists():
+    if force_refresh:
+        need_refresh = True
+        print("[INFO] 强制刷新 token/cookie (WECHAT_FORCE_REFRESH=1)")
+    elif headless and run_mode != "refresh-only" and cfg_path.exists():
         try:
             import json
             cfg = json.loads(cfg_path.read_text(encoding="utf-8")) or {}
