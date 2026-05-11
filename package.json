@@ -1,0 +1,7 @@
+{
+  "name": "wechat-article-crawler",
+  "private": true,
+  "scripts": {
+    "ollama:coder": "node ~/.trae/bin/ollama-coder.mjs"
+  }
+}
