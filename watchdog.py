@@ -104,6 +104,11 @@ def _dedupe_should_send(dedupe_key: str, ttl_seconds: int, state_dir: Optional[P
     return True, 0.0
  
  
+def _dedupe_should_autofix(dedupe_key: str, ttl_seconds: int) -> Tuple[bool, float]:
+    # 自愈（bootstrap/kickstart）也做节流，避免在环境异常时反复触发
+    return _dedupe_should_send(dedupe_key=dedupe_key, ttl_seconds=ttl_seconds)
+
+
 def _send_wecom_once(webhook_url: str, content: str, dedupe_key: str, ttl_seconds: int) -> Dict:
     if not webhook_url:
         return {"ok": False, "skipped": True, "reason": "no_webhook"}
@@ -294,6 +299,7 @@ def main() -> int:
     label = (os.environ.get("WECHAT_LAUNCHD_LABEL") or "com.wechat.articlecrawler.runproject").strip()
     auto_fix = _to_int(os.environ.get("WECHAT_WATCHDOG_AUTO_FIX") or "1", 1) == 1
     alert_ttl = _to_int(os.environ.get("WECHAT_WATCHDOG_ALERT_TTL_SECONDS"), 6 * 3600)
+    autofix_cooldown = _to_int(os.environ.get("WECHAT_WATCHDOG_AUTOFIX_COOLDOWN_SECONDS"), 30 * 60)
     stale_seconds = _to_int(os.environ.get("WECHAT_WATCHDOG_STALE_SECONDS"), 0)
     max_runtime_seconds = _to_int(os.environ.get("WECHAT_WATCHDOG_MAX_RUNTIME_SECONDS"), 3600)
     min_free_gb = _to_float(os.environ.get("WECHAT_WATCHDOG_MIN_FREE_GB"), 2.0)
@@ -351,9 +357,13 @@ def main() -> int:
         if auto_fix:
             user_plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
             cand = user_plist if user_plist.exists() else repo_plist
-            ok, out = _launchctl_bootstrap_gui(uid, cand)
+            should, age = _dedupe_should_autofix(dedupe_key=f"autofix:{it.code}", ttl_seconds=autofix_cooldown)
             it.auto_fix = f"launchctl bootstrap gui/{uid} {cand}"
-            it.auto_fix_result = "ok" if ok else (out.strip()[:800] or "failed")
+            if should:
+                ok, out = _launchctl_bootstrap_gui(uid, cand)
+                it.auto_fix_result = "ok" if ok else (out.strip()[:800] or "failed")
+            else:
+                it.auto_fix_result = f"skipped(cooldown) age_seconds={int(age)}"
         issues.append(it)
     else:
         _log("INFO", f"launchd loaded label={label}")
@@ -373,9 +383,13 @@ def main() -> int:
                     detail=f"last_log_age_seconds={int(age)} stale_seconds={stale_seconds}",
                 )
                 if auto_fix:
-                    ok, out = _launchctl_kickstart_gui(uid, label)
+                    should, age2 = _dedupe_should_autofix(dedupe_key=f"autofix:{it.code}", ttl_seconds=autofix_cooldown)
                     it.auto_fix = f"launchctl kickstart -k gui/{uid}/{label}"
-                    it.auto_fix_result = "ok" if ok else (out.strip()[:800] or "failed")
+                    if should:
+                        ok, out = _launchctl_kickstart_gui(uid, label)
+                        it.auto_fix_result = "ok" if ok else (out.strip()[:800] or "failed")
+                    else:
+                        it.auto_fix_result = f"skipped(cooldown) age_seconds={int(age2)}"
                 issues.append(it)
         except Exception as e:
             issues.append(Issue(code="last_log_stat_failed", title="主任务运行状态检查失败", detail=str(e)))
