@@ -13,6 +13,7 @@ class TestArticleAnalysis(unittest.TestCase):
             {"analysis_enabled": False, "analysis_timeout_seconds": 9}
         )
         self.assertFalse(cfg["analysis_enabled"])
+        self.assertTrue(cfg["analysis_push_batch"])
         self.assertEqual(cfg["analysis_timeout_seconds"], 9)
         self.assertEqual(cfg["analysis_model"], "qwen2.5-coder:14b-cpu")
 
