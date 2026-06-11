@@ -73,6 +73,12 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertEqual(result["status"], "ok")
                 self.assertEqual(result["topic"], "市场情绪")
                 self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][1]["model"], "qwen2.5-coder:14b-cpu")
+                prompt = calls[0][1]["messages"][0]["content"]
+                self.assertIn("只输出 JSON", prompt)
+                self.assertIn("\"topic\"", prompt)
+                self.assertIn("\"core_points\"", prompt)
+                self.assertIn("测试标题", prompt)
                 saved = Path(d) / "article_analysis" / f"{result['article_id']}.json"
                 self.assertTrue(saved.exists())
         finally:
@@ -176,6 +182,83 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_analyze_single_article_write_failure_does_not_interrupt(self):
+        def fake_post(url, json=None, timeout=0):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":\"写失败也返回\",\"core_points\":[\"继续主流程\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                        }
+                    }
+
+            return Resp()
+
+        def fake_write_text(self, data, encoding=None):
+            raise OSError("disk full")
+
+        old_post = article_analysis.requests.post
+        old_write_text = article_analysis.Path.write_text
+        article_analysis.requests.post = fake_post
+        article_analysis.Path.write_text = fake_write_text
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                config = {
+                    "analysis_enabled": True,
+                    "analysis_output_dir": d,
+                    "analysis_save_json": True,
+                }
+                article = {
+                    "account": "测试号",
+                    "title": "写失败文章",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/write-fail",
+                    "markdown": "body",
+                }
+
+                result = article_analysis.analyze_single_article(config, article)
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["topic"], "写失败也返回")
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.Path.write_text = old_write_text
+
+    def test_analyze_single_article_normalizes_string_list_fields(self):
+        def fake_post(url, json=None, timeout=0):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":\"字符串列表\",\"core_points\":\"单条观点\",\"audience\":\"测试者\",\"risks\":\"单条风险\"}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {"analysis_enabled": True, "analysis_output_dir": d},
+                    {"title": "T", "url": "https://mp.weixin.qq.com/s/string-list", "markdown": "body"},
+                )
+                self.assertEqual(result["core_points"], ["单条观点"])
+                self.assertEqual(result["risks"], ["单条风险"])
+        finally:
+            article_analysis.requests.post = old_post
+
     def test_summarize_analysis_batch_success(self):
         calls = []
 
@@ -224,6 +307,41 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertEqual(result["status"], "ok")
                 self.assertEqual(result["batch_focus"], "题材轮动")
                 self.assertEqual(len(calls), 1)
+                prompt = calls[0]["messages"][0]["content"]
+                self.assertIn("只输出 JSON", prompt)
+                self.assertIn("\"batch_focus\"", prompt)
+                self.assertIn("\"shared_themes\"", prompt)
+                self.assertIn("A 文", prompt)
+        finally:
+            article_analysis.requests.post = old_post
+
+    def test_summarize_analysis_batch_normalizes_string_list_fields(self):
+        def fake_post(url, json=None, timeout=0):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"batch_focus\":\"题材轮动\",\"shared_themes\":\"风险偏好回升\",\"priority_reads\":\"A 文，因信息密度高\"}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            result = article_analysis.summarize_analysis_batch(
+                {"analysis_enabled": True},
+                [{"status": "ok", "title": "A 文", "topic": "主线回暖", "core_points": ["回暖"]}],
+                batch_id="20260611_220000",
+            )
+            self.assertEqual(result["shared_themes"], ["风险偏好回升"])
+            self.assertEqual(result["priority_reads"], ["A 文，因信息密度高"])
         finally:
             article_analysis.requests.post = old_post
 

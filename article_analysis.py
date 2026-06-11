@@ -58,14 +58,71 @@ def _load_cached_analysis(cache_path: Path):
         return None
 
 
+def _normalize_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, (list, tuple)):
+        items = []
+        for item in value:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                items.append(text)
+        return items
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _safe_write_text(path: Path, content: str):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _build_single_article_prompt(article, cfg):
+    payload = {
+        "title": article.get("title", ""),
+        "account": article.get("account", ""),
+        "published_at": article.get("published_at") or article.get("date") or "",
+        "url": article.get("url", ""),
+        "markdown": _truncate_markdown(article.get("markdown", ""), cfg["analysis_max_chars"]),
+    }
+    return (
+        "你是微信公众号文章分析助手。请基于给定文章信息生成简洁中文解读。"
+        "只输出 JSON，不要输出 Markdown、解释、代码块或额外文字。"
+        "JSON 必须包含字段：\"topic\"(字符串), \"core_points\"(字符串数组), "
+        "\"audience\"(字符串), \"risks\"(字符串数组)。"
+        "如果信息不足，请保持字段存在并用简短内容说明信息有限。\n"
+        f"文章输入：{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _build_batch_prompt(analyses):
+    return (
+        "你是微信公众号批量解读助手。请基于多篇文章的单篇解读生成本轮汇总。"
+        "只输出 JSON，不要输出 Markdown、解释、代码块或额外文字。"
+        "JSON 必须包含字段：\"batch_focus\"(字符串), \"shared_themes\"(字符串数组), "
+        "\"priority_reads\"(字符串数组)。"
+        "优先总结共性主题和最值得优先阅读的文章。\n"
+        f"输入数据：{json.dumps({'articles': analyses}, ensure_ascii=False)}"
+    )
+
+
 def _parse_single_analysis(content: str):
     data = json.loads(content)
     return {
         "status": "ok",
         "topic": data.get("topic", ""),
-        "core_points": list(data.get("core_points") or []),
+        "core_points": _normalize_list(data.get("core_points")),
         "audience": data.get("audience", ""),
-        "risks": list(data.get("risks") or []),
+        "risks": _normalize_list(data.get("risks")),
     }
 
 
@@ -98,16 +155,7 @@ def analyze_single_article(config, article):
         if isinstance(cached, dict):
             return cached
 
-    prompt = json.dumps(
-        {
-            "title": article.get("title", ""),
-            "account": article.get("account", ""),
-            "published_at": article.get("published_at") or article.get("date") or "",
-            "url": article.get("url", ""),
-            "markdown": _truncate_markdown(article.get("markdown", ""), cfg["analysis_max_chars"]),
-        },
-        ensure_ascii=False,
-    )
+    prompt = _build_single_article_prompt(article, cfg)
 
     try:
         result = _parse_single_analysis(call_ollama_chat(config, prompt))
@@ -126,8 +174,7 @@ def analyze_single_article(config, article):
     )
 
     if cfg.get("analysis_save_json", True):
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        _safe_write_text(cache_path, json.dumps(result, ensure_ascii=False, indent=2))
 
     return result
 
@@ -142,7 +189,7 @@ def summarize_analysis_batch(config, analyses, batch_id: str):
         return {"status": "skipped", "reason": "no_article_analysis", "batch_id": batch_id}
 
     try:
-        data = json.loads(call_ollama_chat(config, json.dumps({"articles": ok_items}, ensure_ascii=False)))
+        data = json.loads(call_ollama_chat(config, _build_batch_prompt(ok_items)))
     except requests.Timeout:
         return {"status": "skipped", "reason": "ollama_timeout", "batch_id": batch_id}
     except Exception as exc:
@@ -152,6 +199,6 @@ def summarize_analysis_batch(config, analyses, batch_id: str):
         "status": "ok",
         "batch_id": batch_id,
         "batch_focus": data.get("batch_focus", ""),
-        "shared_themes": list(data.get("shared_themes") or []),
-        "priority_reads": list(data.get("priority_reads") or []),
+        "shared_themes": _normalize_list(data.get("shared_themes")),
+        "priority_reads": _normalize_list(data.get("priority_reads")),
     }
