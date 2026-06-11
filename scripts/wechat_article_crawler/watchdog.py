@@ -171,6 +171,29 @@ def _tail_text(p: Path, max_bytes: int = 200_000) -> str:
         return data.decode("utf-8", errors="ignore")
     except Exception:
         return ""
+
+
+def _summarize_last_run_block(text: str) -> Dict[str, Optional[int]]:
+    if not text:
+        return {"has_traceback": False, "exit_code": None}
+
+    start_marker = "[launchd] start:"
+    idx = text.rfind(start_marker)
+    block = text[idx:] if idx >= 0 else text
+
+    exit_code = None
+    m = re.search(r"exit=(\d+)", block)
+    if m:
+        exit_code = int(m.group(1))
+    else:
+        m = re.search(r"退出码:\s*(\d+)", block)
+        if m:
+            exit_code = int(m.group(1))
+
+    return {
+        "has_traceback": "Traceback (most recent call last)" in block,
+        "exit_code": exit_code,
+    }
  
  
 def _parse_launchd_calendar_intervals(v) -> List[Tuple[int, int]]:
@@ -406,11 +429,11 @@ def main() -> int:
  
         tail = _tail_text(last_log, max_bytes=200_000)
         if tail:
-            if "Traceback (most recent call last)" in tail:
+            summary = _summarize_last_run_block(tail)
+            if summary["has_traceback"]:
                 issues.append(Issue(code="traceback", title="主任务出现异常堆栈", detail=f"tail_contains=Traceback file={last_log}"))
-            m = re.search(r"退出码:\s*(\d+)", tail)
-            if m:
-                issues.append(Issue(code="nonzero_exit", title="主任务非 0 退出", detail=f"exit_code={m.group(1)} file={last_log}"))
+            if isinstance(summary["exit_code"], int) and summary["exit_code"] != 0:
+                issues.append(Issue(code="nonzero_exit", title="主任务非 0 退出", detail=f"exit_code={summary['exit_code']} file={last_log}"))
  
     stuck = _find_old_bootstrap_process(max_runtime_seconds=max_runtime_seconds)
     if stuck:
