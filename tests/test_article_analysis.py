@@ -622,6 +622,57 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if old_persist is not None:
                 wechat_crawler.persist_single_analysis_outputs = old_persist
 
+    def test_run_extract_from_url_passes_real_config_and_skips_analysis_when_disabled(self):
+        analyze_calls = []
+        push_configs = []
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        old_persist = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
+        try:
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = (
+                lambda config, payload, override_sendkey=None: push_configs.append(config) or {"ok": True}
+            )
+            wechat_crawler.analyze_single_article = lambda config, article: analyze_calls.append(config) or {
+                "status": "ok",
+                "topic": "不应执行",
+                "core_points": ["不应执行"],
+                "audience": "不应执行",
+                "risks": ["不应执行"],
+                "article_id": "unexpected",
+            }
+            wechat_crawler.persist_single_analysis_outputs = lambda config, analysis: self.fail("不应持久化分析结果")
+
+            cfg = {"analysis_enabled": False, "serverchan_sendkey": "sct-test"}
+            payload = wechat_crawler.run_extract_from_url(
+                "https://mp.weixin.qq.com/s/test-config",
+                account_name="测试号",
+                save_markdown=False,
+                push=True,
+                config=cfg,
+            )
+
+            self.assertIsNone(payload["analysis"])
+            self.assertEqual(analyze_calls, [])
+            self.assertEqual(push_configs, [cfg])
+            self.assertEqual(payload["serverchan"], {"ok": True})
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            if old_analyze is not None:
+                wechat_crawler.analyze_single_article = old_analyze
+            if old_persist is not None:
+                wechat_crawler.persist_single_analysis_outputs = old_persist
+
     def test_run_extract_latest_attaches_analysis(self):
         persist_calls = []
 

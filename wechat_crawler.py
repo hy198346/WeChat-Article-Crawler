@@ -971,14 +971,15 @@ def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_mark
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return payload
 
-def run_extract_from_url(article_url, account_name=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True):
+def run_extract_from_url(article_url, account_name=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None):
+    config = config or {}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
     article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
     fetched = fetch_article_markdown(article, headers, account_name=account_name)
-    analysis = _attach_single_article_analysis({}, fetched)
+    analysis = _attach_single_article_analysis(config, fetched)
     payload = {
         "account": fetched["account"],
         "title": fetched["title"],
@@ -989,7 +990,7 @@ def run_extract_from_url(article_url, account_name=None, save_markdown=False, ou
     }
 
     if push:
-        push_result = push_article_to_serverchan({}, payload, override_sendkey=serverchan_sendkey)
+        push_result = push_article_to_serverchan(config, payload, override_sendkey=serverchan_sendkey)
         payload["serverchan"] = push_result
 
     if save_markdown:
@@ -1594,7 +1595,8 @@ def main():
             save_markdown=not args.no_save_markdown,
             output_json_path=args.output_json,
             serverchan_sendkey=args.serverchan_sendkey,
-            push=not args.no_push
+            push=not args.no_push,
+            config=config,
         )
         return
 
