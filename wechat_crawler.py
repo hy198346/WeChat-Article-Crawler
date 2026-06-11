@@ -12,6 +12,7 @@ from pathlib import Path
 from article_analysis import (
     analyze_single_article,
     get_analysis_config,
+    persist_batch_analysis_outputs,
     persist_single_analysis_outputs,
     render_batch_analysis_markdown,
     render_single_analysis_markdown,
@@ -756,7 +757,9 @@ def push_articles_to_serverchan(config, articles, override_sendkey=None, batch_a
     if not sendkey:
         return {"ok": False, "skipped": True, "reason": "no_sendkey"}
     title = f"公众号最新文章（{len(articles)}篇）"
-    desp = build_serverchan_markdown_articles(articles, batch_analysis=batch_analysis)
+    cfg = get_analysis_config(config)
+    batch_block = batch_analysis if cfg.get("analysis_push_batch", True) else None
+    desp = build_serverchan_markdown_articles(articles, batch_analysis=batch_block)
     return send_serverchan_message(sendkey, title, desp)
 
 def run_push_latest_all(
@@ -877,32 +880,40 @@ def run_push_latest_all(
         if key:
             source_by_key[key] = payload
     if changed_articles:
-        for article in changed_articles:
-            source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
-            fetched = source.get("_fetched_article")
-            if not fetched:
-                raw = source.get("_raw_article")
-                if raw:
-                    try:
-                        fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
-                    except Exception:
-                        fetched = None
-            if fetched:
-                analysis = _attach_single_article_analysis(config, fetched)
-            else:
-                analysis = {"status": "skipped", "reason": "missing_article_body"}
-            article["analysis"] = analysis
-            analysis_items.append(
-                {
-                    "status": analysis.get("status"),
-                    "account": article.get("account"),
-                    "title": article.get("title"),
-                    "topic": analysis.get("topic"),
-                    "core_points": analysis.get("core_points"),
-                }
-            )
         batch_id = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        batch_analysis = summarize_analysis_batch(config, analysis_items, batch_id=batch_id)
+        analysis_cfg = get_analysis_config(config)
+        if analysis_cfg.get("analysis_enabled"):
+            for article in changed_articles:
+                source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
+                fetched = source.get("_fetched_article")
+                if not fetched:
+                    raw = source.get("_raw_article")
+                    if raw:
+                        try:
+                            fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
+                        except Exception:
+                            fetched = None
+                if fetched:
+                    analysis = _attach_single_article_analysis(config, fetched)
+                else:
+                    analysis = {"status": "skipped", "reason": "missing_article_body"}
+                article["analysis"] = analysis
+                analysis_items.append(
+                    {
+                        "status": analysis.get("status"),
+                        "account": article.get("account"),
+                        "title": article.get("title"),
+                        "topic": analysis.get("topic"),
+                        "core_points": analysis.get("core_points"),
+                    }
+                )
+            batch_analysis = summarize_analysis_batch(config, analysis_items, batch_id=batch_id)
+            if batch_analysis.get("status") == "ok":
+                persist_batch_analysis_outputs(config, batch_analysis)
+        else:
+            for article in changed_articles:
+                article["analysis"] = {"status": "skipped", "reason": "analysis_disabled"}
+            batch_analysis = {"status": "skipped", "reason": "analysis_disabled", "batch_id": batch_id}
 
     push_result = None
     pushed_fakeids = set()

@@ -7,6 +7,7 @@ import requests
 
 DEFAULT_ANALYSIS_CONFIG = {
     "analysis_enabled": True,
+    "analysis_push_batch": True,
     "analysis_base_url": "http://192.168.9.158:11434",
     "analysis_model": "qwen2.5-coder:14b-cpu",
     "analysis_timeout_seconds": 30,
@@ -49,6 +50,10 @@ def _truncate_markdown(markdown: str, max_chars: int) -> str:
 
 def _article_cache_path(config, article_id: str) -> Path:
     return get_analysis_output_root(config) / "article_analysis" / f"{article_id}.json"
+
+
+def _batch_analysis_base_path(config, batch_id: str) -> Path:
+    return get_analysis_output_root(config) / "article_batches" / batch_id
 
 
 def _load_cached_analysis(cache_path: Path):
@@ -190,6 +195,22 @@ def persist_single_analysis_outputs(config, analysis):
     if cfg.get("analysis_save_markdown"):
         body = render_single_analysis_markdown(analysis)
         _safe_write_text(root / f"{article_id}.md", body + "\n")
+
+
+def persist_batch_analysis_outputs(config, batch_analysis):
+    if not isinstance(batch_analysis, dict):
+        return
+    batch_id = _normalize_scalar_string(batch_analysis.get("batch_id"))
+    if not batch_id:
+        return
+    cfg = get_analysis_config(config)
+    base_path = _batch_analysis_base_path(config, batch_id)
+    if cfg.get("analysis_save_json"):
+        _safe_write_text(base_path.with_suffix(".json"), json.dumps(batch_analysis, ensure_ascii=False, indent=2))
+    if cfg.get("analysis_save_markdown"):
+        body = render_batch_analysis_markdown(batch_analysis)
+        if body:
+            _safe_write_text(base_path.with_suffix(".md"), body + "\n")
 
 
 def _parse_single_analysis(content: str):

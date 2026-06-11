@@ -553,6 +553,27 @@ class TestArticleAnalysisRendering(unittest.TestCase):
             self.assertTrue((Path(d) / "article_analysis" / "abc123.json").exists())
             self.assertTrue((Path(d) / "article_analysis" / "abc123.md").exists())
 
+    def test_persist_batch_analysis_outputs_writes_json_and_markdown(self):
+        with tempfile.TemporaryDirectory() as d:
+            config = {
+                "analysis_enabled": True,
+                "analysis_output_dir": d,
+                "analysis_save_json": True,
+                "analysis_save_markdown": True,
+            }
+            batch_analysis = {
+                "status": "ok",
+                "batch_id": "20260611_223000",
+                "batch_focus": "情绪修复",
+                "shared_themes": ["资金回流"],
+                "priority_reads": ["A 文，因信息密度高"],
+            }
+
+            article_analysis.persist_batch_analysis_outputs(config, batch_analysis)
+
+            self.assertTrue((Path(d) / "article_batches" / "20260611_223000.json").exists())
+            self.assertTrue((Path(d) / "article_batches" / "20260611_223000.md").exists())
+
     def test_render_single_analysis_markdown_for_serverchan(self):
         article = {
             "account": "测试号",
@@ -743,6 +764,39 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
 
 
 class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
+    def test_push_articles_to_serverchan_hides_batch_section_when_disabled(self):
+        calls = []
+
+        old_send = wechat_crawler.send_serverchan_message
+        try:
+            wechat_crawler.send_serverchan_message = (
+                lambda sendkey, title, desp: calls.append((sendkey, title, desp)) or {"ok": True}
+            )
+            result = wechat_crawler.push_articles_to_serverchan(
+                {"serverchan_sendkey": "sct-test", "analysis_push_batch": False},
+                [
+                    {
+                        "account": "号A",
+                        "group": "测试分组",
+                        "title": "A 文",
+                        "published_at": "2026-06-11 21:30",
+                        "url": "https://mp.weixin.qq.com/s/a",
+                    }
+                ],
+                batch_analysis={
+                    "status": "ok",
+                    "batch_focus": "情绪修复",
+                    "shared_themes": ["资金回流"],
+                    "priority_reads": ["A 文，因信息密度高"],
+                },
+            )
+
+            self.assertEqual(result, {"ok": True})
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn("本轮解读", calls[0][2])
+        finally:
+            wechat_crawler.send_serverchan_message = old_send
+
     def test_build_serverchan_markdown_articles_renders_batch_analysis(self):
         desp = wechat_crawler.build_serverchan_markdown_articles(
             [
@@ -766,6 +820,71 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         self.assertIn("情绪修复", desp)
         self.assertIn("资金回流", desp)
 
+    def test_run_push_latest_all_skips_batch_analysis_when_disabled(self):
+        old_load_accounts = wechat_crawler.load_accounts_list
+        old_extract = wechat_crawler._extract_latest_payload_for_account
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_persist_single = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
+        old_save_md = wechat_crawler.save_url_to_md
+        try:
+            wechat_crawler.load_accounts_list = lambda config, accounts_file_override=None: [
+                {"name": "号A", "fakeid": "fidA", "group": "测试分组"}
+            ]
+            wechat_crawler._extract_latest_payload_for_account = lambda **kwargs: {
+                "account": "号A",
+                "fakeid": "fidA",
+                "title": "A 文",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": "https://mp.weixin.qq.com/s/a",
+                "_raw_article": {"title": "A 文", "link": "https://mp.weixin.qq.com/s/a"},
+            }
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "号A",
+                "title": "A 文",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": article["link"],
+                "markdown": "# A 文\n\n正文",
+            }
+            wechat_crawler.analyze_single_article = lambda config, article: {
+                "status": "skipped",
+                "reason": "analysis_disabled",
+                "article_id": "aid-disabled",
+            }
+            wechat_crawler.summarize_analysis_batch = (
+                lambda config, analyses, batch_id: {"status": "skipped", "reason": "analysis_disabled", "batch_id": batch_id}
+            )
+            wechat_crawler.persist_single_analysis_outputs = lambda config, analysis: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
+            wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
+
+            payload = wechat_crawler.run_push_latest_all(
+                {"token": "t", "cookie": "c", "analysis_enabled": False},
+                push=False,
+                save_markdown=False,
+            )
+
+            self.assertEqual(payload["articles"][0]["analysis"]["status"], "skipped")
+            self.assertEqual(payload["batch_analysis"]["status"], "skipped")
+            self.assertEqual(payload["batch_analysis"]["reason"], "analysis_disabled")
+        finally:
+            wechat_crawler.load_accounts_list = old_load_accounts
+            wechat_crawler._extract_latest_payload_for_account = old_extract
+            wechat_crawler.fetch_article_markdown = old_fetch
+            if old_analyze is not None:
+                wechat_crawler.analyze_single_article = old_analyze
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_persist_single is not None:
+                wechat_crawler.persist_single_analysis_outputs = old_persist_single
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
+            wechat_crawler.save_url_to_md = old_save_md
+
     def test_run_push_latest_all_adds_batch_analysis(self):
         old_load_accounts = wechat_crawler.load_accounts_list
         old_extract = wechat_crawler._extract_latest_payload_for_account
@@ -774,6 +893,7 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
         old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
         old_persist = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
         old_config = getattr(wechat_crawler, "get_analysis_config", None)
         old_save_md = wechat_crawler.save_url_to_md
         try:
@@ -814,6 +934,7 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
                 "priority_reads": ["A 文，因信息密度高"],
             }
             wechat_crawler.persist_single_analysis_outputs = lambda config, analysis: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
             wechat_crawler.get_analysis_config = lambda config: {"analysis_enabled": True}
             wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
 
@@ -833,6 +954,8 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
                 wechat_crawler.summarize_analysis_batch = old_batch
             if old_persist is not None:
                 wechat_crawler.persist_single_analysis_outputs = old_persist
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
             if old_config is not None:
                 wechat_crawler.get_analysis_config = old_config
             wechat_crawler.save_url_to_md = old_save_md
