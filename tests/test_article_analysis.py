@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 import article_analysis
+import wechat_crawler
 
 
 class TestArticleAnalysis(unittest.TestCase):
@@ -459,6 +460,51 @@ class TestArticleAnalysis(unittest.TestCase):
             self.assertEqual(result["batch_focus"], "题材轮动")
         finally:
             article_analysis.requests.post = old_post
+
+
+class TestArticleAnalysisRendering(unittest.TestCase):
+    def test_persist_analysis_outputs_writes_json_and_markdown(self):
+        with tempfile.TemporaryDirectory() as d:
+            config = {
+                "analysis_enabled": True,
+                "analysis_output_dir": d,
+                "analysis_save_json": True,
+                "analysis_save_markdown": True,
+            }
+            analysis = {
+                "status": "ok",
+                "article_id": "abc123",
+                "topic": "主线方向",
+                "core_points": ["主线回流", "高位震荡"],
+                "audience": "短线跟踪者",
+                "risks": ["不宜追高"],
+            }
+
+            article_analysis.persist_single_analysis_outputs(config, analysis)
+
+            self.assertTrue((Path(d) / "article_analysis" / "abc123.json").exists())
+            self.assertTrue((Path(d) / "article_analysis" / "abc123.md").exists())
+
+    def test_render_single_analysis_markdown_for_serverchan(self):
+        article = {
+            "account": "测试号",
+            "title": "标题",
+            "published_at": "2026-06-11 21:30",
+            "url": "https://mp.weixin.qq.com/s/x",
+            "analysis": {
+                "status": "ok",
+                "topic": "题材切换",
+                "core_points": ["主线修复", "轮动加快"],
+                "audience": "短线观察者",
+                "risks": ["情绪反复"],
+            },
+        }
+
+        desp = wechat_crawler.build_serverchan_markdown(article)
+
+        self.assertIn("AI解读", desp)
+        self.assertIn("题材切换", desp)
+        self.assertIn("轮动加快", desp)
 
 
 if __name__ == "__main__":

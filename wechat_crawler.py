@@ -9,6 +9,8 @@ import sys
 import hashlib
 from pathlib import Path
 
+from article_analysis import render_single_analysis_markdown
+
 # 配置和数据文件路径
 CONFIG_FILE = "config.json"
 FAKEID_FILE = "gzh.txt"
@@ -571,6 +573,9 @@ def build_serverchan_markdown(article_info):
         f"[阅读全文]({url})" if url else "",
         ""
     ]
+    analysis_markdown = render_single_analysis_markdown(article_info.get("analysis"))
+    if analysis_markdown:
+        lines.extend([analysis_markdown, ""])
     return "\n".join([l for l in lines if l is not None])
 
 def push_article_to_serverchan(config, article_info, override_sendkey=None):

@@ -148,6 +148,36 @@ def _build_batch_prompt(analyses):
     )
 
 
+def render_single_analysis_markdown(analysis):
+    if not isinstance(analysis, dict) or analysis.get("status") != "ok":
+        return ""
+    core_points = "；".join(_normalize_list(analysis.get("core_points"))) or "无"
+    risks = "；".join(_normalize_list(analysis.get("risks"))) or "无"
+    lines = [
+        "### AI解读",
+        f"- 主题：{_normalize_scalar_string(analysis.get('topic')) or 'Unknown'}",
+        f"- 核心观点：{core_points}",
+        f"- 适合谁看：{_normalize_scalar_string(analysis.get('audience')) or '未说明'}",
+        f"- 风险/注意点：{risks}",
+    ]
+    return "\n".join(lines)
+
+
+def persist_single_analysis_outputs(config, analysis):
+    if not isinstance(analysis, dict):
+        return
+    article_id = _normalize_scalar_string(analysis.get("article_id"))
+    if not article_id:
+        return
+    cfg = get_analysis_config(config)
+    root = get_analysis_output_root(config) / "article_analysis"
+    if cfg.get("analysis_save_json"):
+        _safe_write_text(root / f"{article_id}.json", json.dumps(analysis, ensure_ascii=False, indent=2))
+    if cfg.get("analysis_save_markdown"):
+        body = render_single_analysis_markdown(analysis)
+        _safe_write_text(root / f"{article_id}.md", body + "\n")
+
+
 def _parse_single_analysis(content: str):
     data = json.loads(content)
     return {
@@ -206,8 +236,8 @@ def analyze_single_article(config, article):
         }
     )
 
-    if cfg.get("analysis_save_json", True):
-        _safe_write_text(cache_path, json.dumps(result, ensure_ascii=False, indent=2))
+    if cfg.get("analysis_save_json", True) or cfg.get("analysis_save_markdown", True):
+        persist_single_analysis_outputs(config, result)
 
     return result
 
