@@ -142,19 +142,29 @@ curl http://127.0.0.1:11434/api/tags
 - 局域网其他机器运行 Ollama：把 `analysis_base_url` 改成对应机器地址，例如 `http://192.168.9.158:11434`
 - 如果暂时不想启用 AI：保持 `analysis_enabled=false`
 
-推荐先用单篇链接调试：
+下面这些示例命令用于“启用 AI 解读后”的场景。
+
+开始前请先在 `config.json` 中显式设置：
+
+```json
+{
+  "analysis_enabled": true
+}
+```
+
+启用 AI 后，推荐先用单篇链接调试：
 
 ```bash
 python wechat_crawler.py --article-url "https://mp.weixin.qq.com/s/xxxx" --no-push
 ```
 
-读取指定公众号最新文章并附带 AI 解读：
+启用 AI 后，读取指定公众号最新文章并附带 AI 解读：
 
 ```bash
 python wechat_crawler.py --extract-latest --account "顽主杯实盘大赛" --no-push
 ```
 
-批量抓取并汇总推送：
+启用 AI 后，批量抓取并汇总推送：
 
 ```bash
 python wechat_crawler.py --push-latest-all --accounts-file accounts.json
