@@ -182,6 +182,62 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_analyze_single_article_ignores_invalid_cached_dict_and_reanalyzes(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0):
+            calls.append((url, json, timeout))
+
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":\"结构坏缓存后重跑\",\"core_points\":[\"重新分析\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                article = {
+                    "account": "测试号",
+                    "title": "结构坏缓存文章",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/invalid-cache",
+                    "markdown": "body",
+                }
+                config = {
+                    "analysis_enabled": True,
+                    "analysis_output_dir": d,
+                    "analysis_skip_if_exists": True,
+                }
+                article_id = article_analysis.build_article_id(article)
+                cache_dir = Path(d) / "article_analysis"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                (cache_dir / f"{article_id}.json").write_text(
+                    json.dumps(
+                        {"status": "ok", "article_id": article_id, "topic": ["错误类型"]},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                result = article_analysis.analyze_single_article(config, article)
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["topic"], "结构坏缓存后重跑")
+                self.assertEqual(len(calls), 1)
+        finally:
+            article_analysis.requests.post = old_post
+
     def test_analyze_single_article_write_failure_does_not_interrupt(self):
         def fake_post(url, json=None, timeout=0):
             class Resp:

@@ -58,6 +58,28 @@ def _load_cached_analysis(cache_path: Path):
         return None
 
 
+def _is_valid_cached_single_analysis(data):
+    if not isinstance(data, dict):
+        return False
+    if data.get("status") != "ok":
+        return False
+    if not isinstance(data.get("article_id"), str) or not data.get("article_id").strip():
+        return False
+    if not isinstance(data.get("topic"), str):
+        return False
+    if not isinstance(data.get("audience", ""), str):
+        return False
+    for field in ("core_points", "risks"):
+        value = data.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            return False
+        if any(not isinstance(item, str) for item in value):
+            return False
+    return True
+
+
 def _normalize_list(value):
     if value is None:
         return []
@@ -152,7 +174,7 @@ def analyze_single_article(config, article):
 
     if cfg.get("analysis_skip_if_exists") and cache_path.exists():
         cached = _load_cached_analysis(cache_path)
-        if isinstance(cached, dict):
+        if _is_valid_cached_single_analysis(cached):
             return cached
 
     prompt = _build_single_article_prompt(article, cfg)
