@@ -99,6 +99,17 @@ def _normalize_list(value):
     return [text] if text else []
 
 
+def _normalize_scalar_string(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        items = _normalize_list(value)
+        return items[0] if items else ""
+    return str(value).strip()
+
+
 def _safe_write_text(path: Path, content: str):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,9 +152,9 @@ def _parse_single_analysis(content: str):
     data = json.loads(content)
     return {
         "status": "ok",
-        "topic": data.get("topic", ""),
+        "topic": _normalize_scalar_string(data.get("topic")),
         "core_points": _normalize_list(data.get("core_points")),
-        "audience": data.get("audience", ""),
+        "audience": _normalize_scalar_string(data.get("audience")),
         "risks": _normalize_list(data.get("risks")),
     }
 
@@ -220,7 +231,7 @@ def summarize_analysis_batch(config, analyses, batch_id: str):
     return {
         "status": "ok",
         "batch_id": batch_id,
-        "batch_focus": data.get("batch_focus", ""),
+        "batch_focus": _normalize_scalar_string(data.get("batch_focus")),
         "shared_themes": _normalize_list(data.get("shared_themes")),
         "priority_reads": _normalize_list(data.get("priority_reads")),
     }

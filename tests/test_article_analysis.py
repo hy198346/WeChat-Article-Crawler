@@ -315,6 +315,36 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_analyze_single_article_normalizes_scalar_fields_to_string(self):
+        def fake_post(url, json=None, timeout=0):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":[\"题材轮动\"],\"core_points\":[\"单条观点\"],\"audience\":123,\"risks\":[\"单条风险\"]}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {"analysis_enabled": True, "analysis_output_dir": d},
+                    {"title": "T", "url": "https://mp.weixin.qq.com/s/scalar-fields", "markdown": "body"},
+                )
+                self.assertEqual(result["topic"], "题材轮动")
+                self.assertEqual(result["audience"], "123")
+        finally:
+            article_analysis.requests.post = old_post
+
     def test_summarize_analysis_batch_success(self):
         calls = []
 
@@ -398,6 +428,35 @@ class TestArticleAnalysis(unittest.TestCase):
             )
             self.assertEqual(result["shared_themes"], ["风险偏好回升"])
             self.assertEqual(result["priority_reads"], ["A 文，因信息密度高"])
+        finally:
+            article_analysis.requests.post = old_post
+
+    def test_summarize_analysis_batch_normalizes_batch_focus_to_string(self):
+        def fake_post(url, json=None, timeout=0):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"batch_focus\":[\"题材轮动\"],\"shared_themes\":[\"风险偏好回升\"],\"priority_reads\":[\"A 文，因信息密度高\"]}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            result = article_analysis.summarize_analysis_batch(
+                {"analysis_enabled": True},
+                [{"status": "ok", "title": "A 文", "topic": "主线回暖", "core_points": ["回暖"]}],
+                batch_id="20260611_221500",
+            )
+            self.assertEqual(result["batch_focus"], "题材轮动")
         finally:
             article_analysis.requests.post = old_post
 
