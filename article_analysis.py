@@ -6,9 +6,9 @@ import requests
 
 
 DEFAULT_ANALYSIS_CONFIG = {
-    "analysis_enabled": True,
+    "analysis_enabled": False,
     "analysis_push_batch": True,
-    "analysis_base_url": "http://192.168.9.158:11434",
+    "analysis_base_url": "http://127.0.0.1:11434",
     "analysis_model": "qwen2.5-coder:14b-cpu",
     "analysis_timeout_seconds": 30,
     "analysis_max_chars": 8000,

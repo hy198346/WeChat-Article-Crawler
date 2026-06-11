@@ -16,6 +16,14 @@ class TestArticleAnalysis(unittest.TestCase):
         self.assertTrue(cfg["analysis_push_batch"])
         self.assertEqual(cfg["analysis_timeout_seconds"], 9)
         self.assertEqual(cfg["analysis_model"], "qwen2.5-coder:14b-cpu")
+        self.assertEqual(cfg["analysis_base_url"], "http://127.0.0.1:11434")
+
+    def test_get_analysis_config_defaults_disable_ai(self):
+        cfg = article_analysis.get_analysis_config({})
+
+        self.assertFalse(cfg["analysis_enabled"])
+        self.assertTrue(cfg["analysis_push_batch"])
+        self.assertEqual(cfg["analysis_base_url"], "http://127.0.0.1:11434")
 
     def test_analyze_single_article_success_persists_cache(self):
         calls = []
@@ -632,6 +640,7 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 account_name="测试号",
                 save_markdown=False,
                 push=False,
+                config={"analysis_enabled": True},
             )
 
             self.assertEqual(payload["analysis"]["topic"], "主线回暖")
