@@ -1,9 +1,6 @@
 {
     "token": "你的token",
     "cookie": "你的cookie值",
-    "serverchan_sendkey": "你的SendKey（可选）",
-    "accounts_file": "accounts.json",
-    "push_state_file": "push_state.json",
     "min_file_size_kb": 3,
     "check_interval_minutes": 60,
     "retry_interval_minutes": 5,

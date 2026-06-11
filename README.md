@@ -114,6 +114,30 @@ python wechat_crawler.py --push-latest-all --force
 - 批量模式会生成：本轮重点、共性观点、优先阅读
 - 汇总推送时可通过 `analysis_push_batch` 控制是否在 Server 酱正文追加“本轮解读”
 
+开始前请先完成 Ollama 前置准备：
+
+1. 安装 Ollama
+   - macOS 可参考 [Ollama 官网](https://ollama.com/download) 安装，或用 `brew install ollama`
+2. 启动 Ollama 服务
+
+```bash
+ollama serve
+```
+
+3. 拉取本项目默认模型
+
+```bash
+ollama pull qwen2.5-coder:14b-cpu
+```
+
+4. 检查服务与模型连通性
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+如果你用的是局域网 Ollama，请把 `analysis_base_url` 改成对应机器地址，例如 `http://192.168.9.158:11434`。
+
 推荐先用单篇链接调试：
 
 ```bash
