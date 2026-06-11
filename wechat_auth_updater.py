@@ -77,6 +77,17 @@ def _extract_getmsg_params(url: str) -> Dict[str, Any]:
         return {"full_url": url, "captured_at": int(time.time())}
 
 
+def _resolve_browser_executable() -> Optional[str]:
+    candidates = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return None
+
+
 async def _try_accept_agreement(page) -> bool:
     try:
         url = page.url or ""
@@ -219,17 +230,32 @@ async def refresh_wechat_auth(
     }
 
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=headless,
-            args=[
+        launch_kwargs = {
+            "user_data_dir": profile_dir,
+            "headless": headless,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=DownloadBubble,DownloadBubbleV2",
                 "--disable-download-notification",
                 "--no-first-run",
                 "--no-default-browser-check",
             ],
-        )
+        }
+        try:
+            context = await p.chromium.launch_persistent_context(**launch_kwargs)
+        except Exception as e:
+            msg = str(e)
+            if "Executable doesn't exist" not in msg:
+                raise
+            browser_executable = _resolve_browser_executable()
+            if not browser_executable:
+                raise
+            print(f"Playwright Chromium 不存在，改用系统浏览器: {browser_executable}")
+            context = await p.chromium.launch_persistent_context(
+                executable_path=browser_executable,
+                channel="chrome",
+                **launch_kwargs,
+            )
 
         logs: List[str] = []
         failed = False
