@@ -163,6 +163,20 @@ def render_single_analysis_markdown(analysis):
     return "\n".join(lines)
 
 
+def render_batch_analysis_markdown(batch_analysis):
+    if not isinstance(batch_analysis, dict) or batch_analysis.get("status") != "ok":
+        return ""
+    shared_themes = "；".join(_normalize_list(batch_analysis.get("shared_themes"))) or "无"
+    priority_reads = "；".join(_normalize_list(batch_analysis.get("priority_reads"))) or "无"
+    lines = [
+        "## 本轮解读",
+        f"- 本轮重点：{_normalize_scalar_string(batch_analysis.get('batch_focus')) or '无'}",
+        f"- 共性观点：{shared_themes}",
+        f"- 优先阅读：{priority_reads}",
+    ]
+    return "\n".join(lines)
+
+
 def persist_single_analysis_outputs(config, analysis):
     if not isinstance(analysis, dict):
         return

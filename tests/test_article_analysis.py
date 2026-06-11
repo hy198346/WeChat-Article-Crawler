@@ -742,5 +742,101 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             wechat_crawler.save_url_to_md = old_save_md
 
 
+class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
+    def test_build_serverchan_markdown_articles_renders_batch_analysis(self):
+        desp = wechat_crawler.build_serverchan_markdown_articles(
+            [
+                {
+                    "account": "号A",
+                    "group": "测试分组",
+                    "title": "A 文",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/a",
+                }
+            ],
+            batch_analysis={
+                "status": "ok",
+                "batch_focus": "情绪修复",
+                "shared_themes": ["资金回流"],
+                "priority_reads": ["A 文，因信息密度高"],
+            },
+        )
+
+        self.assertIn("本轮解读", desp)
+        self.assertIn("情绪修复", desp)
+        self.assertIn("资金回流", desp)
+
+    def test_run_push_latest_all_adds_batch_analysis(self):
+        old_load_accounts = wechat_crawler.load_accounts_list
+        old_extract = wechat_crawler._extract_latest_payload_for_account
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_articles_to_serverchan
+        old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_persist = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
+        old_config = getattr(wechat_crawler, "get_analysis_config", None)
+        old_save_md = wechat_crawler.save_url_to_md
+        try:
+            wechat_crawler.load_accounts_list = lambda config, accounts_file_override=None: [
+                {"name": "号A", "fakeid": "fidA", "group": "测试分组"}
+            ]
+            wechat_crawler._extract_latest_payload_for_account = lambda **kwargs: {
+                "account": "号A",
+                "fakeid": "fidA",
+                "title": "A 文",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": "https://mp.weixin.qq.com/s/a",
+                "_raw_article": {"title": "A 文", "link": "https://mp.weixin.qq.com/s/a"},
+            }
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "号A",
+                "title": "A 文",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": article["link"],
+                "markdown": "# A 文\n\n正文",
+            }
+            wechat_crawler.push_articles_to_serverchan = lambda *args, **kwargs: {"ok": True}
+            wechat_crawler.analyze_single_article = lambda config, article: {
+                "status": "ok",
+                "article_id": "aid1",
+                "topic": "题材修复",
+                "core_points": ["回流"],
+                "audience": "观察者",
+                "risks": ["震荡"],
+            }
+            wechat_crawler.summarize_analysis_batch = lambda config, analyses, batch_id: {
+                "status": "ok",
+                "batch_id": batch_id,
+                "batch_focus": "情绪修复",
+                "shared_themes": ["资金回流"],
+                "priority_reads": ["A 文，因信息密度高"],
+            }
+            wechat_crawler.persist_single_analysis_outputs = lambda config, analysis: None
+            wechat_crawler.get_analysis_config = lambda config: {"analysis_enabled": True}
+            wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
+
+            config = {"token": "t", "cookie": "c"}
+            payload = wechat_crawler.run_push_latest_all(config, push=False, save_markdown=False)
+
+            self.assertEqual(payload["articles"][0]["analysis"]["topic"], "题材修复")
+            self.assertEqual(payload["batch_analysis"]["batch_focus"], "情绪修复")
+        finally:
+            wechat_crawler.load_accounts_list = old_load_accounts
+            wechat_crawler._extract_latest_payload_for_account = old_extract
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_articles_to_serverchan = old_push
+            if old_analyze is not None:
+                wechat_crawler.analyze_single_article = old_analyze
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_persist is not None:
+                wechat_crawler.persist_single_analysis_outputs = old_persist
+            if old_config is not None:
+                wechat_crawler.get_analysis_config = old_config
+            wechat_crawler.save_url_to_md = old_save_md
+
+
 if __name__ == "__main__":
     unittest.main()

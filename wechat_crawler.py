@@ -13,7 +13,9 @@ from article_analysis import (
     analyze_single_article,
     get_analysis_config,
     persist_single_analysis_outputs,
+    render_batch_analysis_markdown,
     render_single_analysis_markdown,
+    summarize_analysis_batch,
 )
 
 # 配置和数据文件路径
@@ -715,7 +717,7 @@ def _extract_latest_payload_for_account(fakeid: str, account_name: str, token: s
         "_raw_article": chosen,
     }
 
-def build_serverchan_markdown_articles(articles):
+def build_serverchan_markdown_articles(articles, batch_analysis=None):
     lines = []
     groups = {}
     group_rank = {}
@@ -743,14 +745,18 @@ def build_serverchan_markdown_articles(articles):
                 lines.append(f"- {label}")
         lines.append("")
 
+    batch_markdown = render_batch_analysis_markdown(batch_analysis)
+    if batch_markdown:
+        lines.extend([batch_markdown, ""])
+
     return "\n".join([l for l in lines if l is not None]).rstrip()
 
-def push_articles_to_serverchan(config, articles, override_sendkey=None):
+def push_articles_to_serverchan(config, articles, override_sendkey=None, batch_analysis=None):
     sendkey = _get_serverchan_sendkey(config, override_sendkey=override_sendkey)
     if not sendkey:
         return {"ok": False, "skipped": True, "reason": "no_sendkey"}
     title = f"公众号最新文章（{len(articles)}篇）"
-    desp = build_serverchan_markdown_articles(articles)
+    desp = build_serverchan_markdown_articles(articles, batch_analysis=batch_analysis)
     return send_serverchan_message(sendkey, title, desp)
 
 def run_push_latest_all(
@@ -821,9 +827,10 @@ def run_push_latest_all(
                         "url": url,
                         "fakeid": state_key,
                         "group": group,
+                        "_raw_article": {"title": fetched.get("title") or "Unknown", "link": url, "create_time": 0, "digest": "", "author": ""},
                     }
                 )
-                per_account_payloads.append({"account": name, "fakeid": state_key, "url": url})
+                per_account_payloads.append({"account": name, "fakeid": state_key, "url": url, "_fetched_article": fetched})
                 continue
 
             print(f"[Skip] 无法解析 fakeid：{name}")
@@ -847,6 +854,7 @@ def run_push_latest_all(
             "url": payload["url"],
             "fakeid": fakeid,
             "group": group,
+            "_raw_article": payload.get("_raw_article"),
         })
         per_account_payloads.append(payload)
 
@@ -861,6 +869,41 @@ def run_push_latest_all(
             ordered.extend(grouped[g])
         changed_articles = ordered
 
+    analysis_items = []
+    batch_analysis = None
+    source_by_key = {}
+    for payload in per_account_payloads:
+        key = payload.get("fakeid") or payload.get("url")
+        if key:
+            source_by_key[key] = payload
+    if changed_articles:
+        for article in changed_articles:
+            source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
+            fetched = source.get("_fetched_article")
+            if not fetched:
+                raw = source.get("_raw_article")
+                if raw:
+                    try:
+                        fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
+                    except Exception:
+                        fetched = None
+            if fetched:
+                analysis = _attach_single_article_analysis(config, fetched)
+            else:
+                analysis = {"status": "skipped", "reason": "missing_article_body"}
+            article["analysis"] = analysis
+            analysis_items.append(
+                {
+                    "status": analysis.get("status"),
+                    "account": article.get("account"),
+                    "title": article.get("title"),
+                    "topic": analysis.get("topic"),
+                    "core_points": analysis.get("core_points"),
+                }
+            )
+        batch_id = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        batch_analysis = summarize_analysis_batch(config, analysis_items, batch_id=batch_id)
+
     push_result = None
     pushed_fakeids = set()
     if push and changed_articles:
@@ -874,7 +917,12 @@ def run_push_latest_all(
                     pushed_fakeids.add(a["fakeid"])
             push_result = {"ok": True, "mode": "separate", "results": results}
         else:
-            push_result = push_articles_to_serverchan(config, changed_articles, override_sendkey=serverchan_sendkey)
+            push_result = push_articles_to_serverchan(
+                config,
+                changed_articles,
+                override_sendkey=serverchan_sendkey,
+                batch_analysis=batch_analysis,
+            )
             if push_result and push_result.get("ok") and (not push_result.get("skipped")):
                 for a in changed_articles:
                     if a.get("fakeid"):
@@ -903,9 +951,14 @@ def run_push_latest_all(
         if state_path:
             save_json(state_path, state)
 
+    payload_articles = []
+    for article in changed_articles:
+        payload_articles.append({key: value for key, value in article.items() if not key.startswith("_")})
+
     payload_out = {
         "count": len(changed_articles),
-        "articles": changed_articles,
+        "articles": payload_articles,
+        "batch_analysis": batch_analysis,
         "serverchan": push_result if push else {"ok": False, "skipped": True, "reason": "no_push"},
         "push_state_file": state_path,
     }
