@@ -3,6 +3,7 @@ import re
 import sys
 import json
 import time
+import tempfile
 import socket
 import shutil
 import plistlib
@@ -325,9 +326,65 @@ def _format_issue_lines(issues: List[Issue]) -> str:
     return "\n".join(lines)
  
  
+def _write_failure_summary(root: Path, issues: List[Issue], generated_at: Optional[str] = None) -> Path:
+    out_path = root / "output" / "watchdog_last_failure.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    codes = sorted(set([it.code for it in issues if it.code]))
+    payload = {
+        "generated_at": generated_at or _ts_now(),
+        "status": "failed",
+        "codes": codes,
+        "title": "WeChat-Article-Crawler Watchdog Failure",
+        "detail": f"{len(codes)} issues detected",
+        "issues": [
+            {
+                "code": it.code,
+                "title": it.title,
+                "detail": it.detail,
+                "auto_fix": it.auto_fix,
+                "auto_fix_result": it.auto_fix_result,
+            }
+            for it in issues
+        ],
+    }
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{out_path.stem}.", suffix=".tmp", dir=out_path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, out_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    return out_path
+
+
+def _clear_failure_summary(root: Path) -> bool:
+    out_path = root / "output" / "watchdog_last_failure.json"
+    if not out_path.exists():
+        return False
+    try:
+        os.remove(out_path)
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
 def main() -> int:
     root = _repo_root()
     env_loaded = _load_env_into_process(root)
+
+    enabled = _to_int(os.environ.get("WECHAT_WATCHDOG_ENABLED") or "1", 1) == 1
+    if not enabled:
+        if _clear_failure_summary(root):
+            _log("INFO", "failure_summary cleared while disabled")
+        _log("INFO", "disabled by WECHAT_WATCHDOG_ENABLED=0")
+        return 0
  
     label = (os.environ.get("WECHAT_LAUNCHD_LABEL") or "com.wechat.articlecrawler.runproject").strip()
     auto_fix = _to_int(os.environ.get("WECHAT_WATCHDOG_AUTO_FIX") or "1", 1) == 1
@@ -441,11 +498,6 @@ def main() -> int:
         detail = "; ".join([f"pid={pid} etimes={et}s" for pid, et, _ in top])
         issues.append(Issue(code="process_stuck", title="主任务可能卡死", detail=f"count={len(stuck)} {detail} (threshold={max_runtime_seconds}s)"))
  
-    enabled = _to_int(os.environ.get("WECHAT_WATCHDOG_ENABLED") or "1", 1) == 1
-    if not enabled:
-        _log("INFO", "disabled by WECHAT_WATCHDOG_ENABLED=0")
-        return 0
- 
     if issues:
         title = "❌ WeChat-Article-Crawler Watchdog"
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -453,6 +505,11 @@ def main() -> int:
         _log("WARN", f"issues={len(issues)}")
         for it in issues:
             _log("WARN", f"issue code={it.code} title={it.title}")
+        try:
+            summary_path = _write_failure_summary(root, issues)
+            _log("WARN", f"failure_summary written path={summary_path}")
+        except Exception as e:
+            _log("WARN", f"failure_summary_write_failed error={e}")
         codes = ",".join(sorted(set([it.code for it in issues if it.code])))
         dedupe_key = f"watchdog:summary:{codes}" if codes else "watchdog:summary"
         _send_serverchan_once(title, desp, dedupe_key=dedupe_key, ttl_seconds=alert_ttl)
@@ -460,6 +517,8 @@ def main() -> int:
         if wecom:
             _send_wecom_once(wecom, f"{title}\n{desp}", dedupe_key=dedupe_key, ttl_seconds=alert_ttl)
     else:
+        if _clear_failure_summary(root):
+            _log("INFO", "failure_summary cleared")
         _log("INFO", "ok")
     return 0
  
