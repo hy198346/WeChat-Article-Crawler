@@ -1,7 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
-ROOT="/Users/chenwangqian/trae/WeChat-Article-Crawler"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_ENV_FILE="$ROOT/.env"
 if [[ -z "${WECHAT_ENV_FILE:-}" && -f "${DEFAULT_ENV_FILE}" ]]; then
   WECHAT_ENV_FILE="${DEFAULT_ENV_FILE}"
@@ -17,7 +18,7 @@ cd "$ROOT"
 
 mkdir -p "$ROOT/logs"
 
-export WECHAT_PROFILE_DIR="${WECHAT_PROFILE_DIR:-./my_wechat_profile}"
+export WECHAT_PROFILE_DIR="${WECHAT_PROFILE_DIR:-./output/my_wechat_profile}"
 export WECHAT_HEADLESS="${WECHAT_HEADLESS:-1}"
 export WECHAT_REFRESH_MAX_WAIT="${WECHAT_REFRESH_MAX_WAIT:-900}"
 export WECHAT_RUN_MODE="${WECHAT_RUN_MODE:-push-latest-all}"
@@ -32,7 +33,7 @@ alert_fail() {
   if [[ -n "${WECOM_WEBHOOK_URL:-}" ]]; then
     curl -s -X POST "$WECOM_WEBHOOK_URL" \
       -H 'Content-Type: application/json' \
-      -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"${level} WeChat-Article-Crawler\\n${msg}\\n时间: $(date '+%Y-%m-%d %H:%M')\\n修复: 在Trae中手动运行 python3 bootstrap_refresh_auth.py 扫码刷新token\"}}" \
+      -d "{\"msgtype\":\"text\",\"text\":{\"content\":\"${level} WeChat-Article-Crawler\\n${msg}\\n时间: $(date '+%Y-%m-%d %H:%M')\\n修复: 在Trae中手动运行 python3 scripts/wechat_article_crawler/bootstrap_refresh_auth.py 扫码刷新token\"}}" \
       >/dev/null 2>&1
   fi
 
@@ -53,7 +54,7 @@ level = os.environ.get("ALERT_LEVEL", "⚠️")
 msg = os.environ.get("ALERT_MSG", "")
 now = datetime.now().strftime("%Y-%m-%d %H:%M")
 title = f"{level} WeChat-Article-Crawler"
-desp = f"{msg}\n\n时间: {now}\n\n修复: 在Trae中手动运行 python3 bootstrap_refresh_auth.py 扫码刷新token"
+desp = f"{msg}\n\n时间: {now}\n\n修复: 在Trae中手动运行 python3 scripts/wechat_article_crawler/bootstrap_refresh_auth.py 扫码刷新token"
 send_serverchan_message(sendkey, title, desp)
 PY
 }
@@ -120,7 +121,7 @@ EXIT_CODE=0
 AUTH_EXPIRED_FINAL=0
 
 echo "[launchd] start: $(date '+%Y-%m-%d %H:%M:%S')" > "$LOG_FILE"
-run_phase "main" /usr/bin/python3 "$ROOT/bootstrap_refresh_auth.py" || EXIT_CODE=$?
+run_phase "main" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
 AUTH_EXPIRED_MAIN="$PHASE_AUTH_EXPIRED"
 AUTH_EXPIRED_FINAL="$AUTH_EXPIRED_MAIN"
 
@@ -128,9 +129,9 @@ if [ "${AUTH_EXPIRED_MAIN}" -eq 1 ]; then
   SESSION_COUNT=$(grep -Ec "$AUTH_MARKER_RE" "$LOG_FILE" || echo "1")
   alert_info_once "检测到 token/cookie 可能已失效（${SESSION_COUNT}处认证异常），将自动刷新并重试" "auth_expired_detected" "${WECHAT_AUTH_EXPIRED_ALERT_TTL_SECONDS:-21600}"
 
-  run_phase "refresh-only" env WECHAT_RUN_MODE="refresh-only" WECHAT_FORCE_REFRESH="1" /usr/bin/python3 "$ROOT/bootstrap_refresh_auth.py" || EXIT_CODE=$?
+  run_phase "refresh-only" env WECHAT_RUN_MODE="refresh-only" WECHAT_FORCE_REFRESH="1" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
   if [ "$EXIT_CODE" -eq 0 ]; then
-    run_phase "main-retry" env WECHAT_RUN_MODE="push-latest-all" WECHAT_FORCE_REFRESH="0" /usr/bin/python3 "$ROOT/bootstrap_refresh_auth.py" || EXIT_CODE=$?
+    run_phase "main-retry" env WECHAT_RUN_MODE="push-latest-all" WECHAT_FORCE_REFRESH="0" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
     AUTH_EXPIRED_FINAL="$PHASE_AUTH_EXPIRED"
   fi
 fi

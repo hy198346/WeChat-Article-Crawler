@@ -11,7 +11,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>/bin/zsh</string>
-      <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/run_project_launchd.sh</string>
+      <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/bin/run_project_launchd.sh</string>
     </array>
 
     <key>StartCalendarInterval</key>

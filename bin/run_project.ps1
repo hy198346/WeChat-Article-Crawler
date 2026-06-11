@@ -1,5 +1,5 @@
 param(
-  [string]$ProfileDir = "./my_wechat_profile",
+  [string]$ProfileDir = "./output/my_wechat_profile",
   [switch]$Headless,
   [int]$MaxWait = 600,
   [string]$Account = "",
@@ -17,9 +17,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Set-Location $PSScriptRoot
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $RepoRoot
 
-$logsDir = Join-Path $PSScriptRoot "logs"
+$logsDir = Join-Path $RepoRoot "logs"
 New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 
 if ($LogFile -eq "") {
@@ -149,9 +150,9 @@ if (-not $env:SERVERCHAN_SENDKEY -or $env:SERVERCHAN_SENDKEY -eq "") {
   Write-Host "  Option 1 (current session):" -ForegroundColor Yellow
   Write-Host "    `$env:SERVERCHAN_SENDKEY=`"SCTxxxxxxxxxxxxxxxx`"" -ForegroundColor DarkYellow
   Write-Host "  Option 2 (pass to script):" -ForegroundColor Yellow
-  Write-Host "    powershell -NoProfile -ExecutionPolicy Bypass -File .\\run_project.ps1 -ServerChanSendKey 'SCTxxxxxxxxxxxxxxxx'" -ForegroundColor DarkYellow
+  Write-Host "    powershell -NoProfile -ExecutionPolicy Bypass -File .\\bin\\run_project.ps1 -ServerChanSendKey 'SCTxxxxxxxxxxxxxxxx'" -ForegroundColor DarkYellow
   Write-Host "  Option 3 (prompt, hidden input):" -ForegroundColor Yellow
-  Write-Host "    powershell -NoProfile -ExecutionPolicy Bypass -File .\\run_project.ps1 -PromptServerChan" -ForegroundColor DarkYellow
+  Write-Host "    powershell -NoProfile -ExecutionPolicy Bypass -File .\\bin\\run_project.ps1 -PromptServerChan" -ForegroundColor DarkYellow
 }
 
 $env:WECHAT_PROFILE_DIR = $ProfileDir
@@ -161,7 +162,7 @@ $env:WECHAT_RUN_MODE = $RunMode
 $env:WECHAT_SKIP_INSTALL = "1"  # PowerShell脚本已处理安装，跳过Python脚本中的安装
 $env:WECHAT_FORCE_PUSH = $(if ($Force) { "1" } else { "0" })
 
-Invoke-Step "Run project (refresh-auth + $RunMode)" { python bootstrap_refresh_auth.py }
+Invoke-Step "Run project (refresh-auth + $RunMode)" { python .\bootstrap_refresh_auth.py }
 
 if (Test-Path "config.json") {
   try {

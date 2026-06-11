@@ -1,5 +1,5 @@
 param(
-  [string]$ProfileDir = "./my_wechat_profile",
+  [string]$ProfileDir = "./output/my_wechat_profile",
   [switch]$Headless,
   [int]$MaxWait = 600,
   [string]$Account = "",
@@ -13,7 +13,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Set-Location $PSScriptRoot
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $RepoRoot
 
 if ($ServerChanSendKey -ne "") {
   $env:SERVERCHAN_SENDKEY = $ServerChanSendKey

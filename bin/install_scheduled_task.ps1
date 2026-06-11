@@ -1,6 +1,6 @@
 param(
   [string]$TaskName = "WeChat-Article-Crawler",
-  [string]$ProfileDir = "./my_wechat_profile",
+  [string]$ProfileDir = "./output/my_wechat_profile",
   [string]$AccountsFile = "./accounts.json",
   [string]$TargetUrl = "",
   [string]$ServerChanSendKey = "",
@@ -14,7 +14,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Set-Location $PSScriptRoot
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+Set-Location $RepoRoot
 
 # 检查执行策略
 $execPolicy = Get-ExecutionPolicy
@@ -58,7 +59,7 @@ if ($Headless) { $argList += "-Headless" }
 if ($TargetUrl -ne "") { $argList += @("-TargetUrl", "`"$TargetUrl`"") }
 if ($ServerChanSendKey -ne "") { $argList += @("-ServerChanSendKey", "`"$ServerChanSendKey`"") }
 
-$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($argList -join " ") -WorkingDirectory $PSScriptRoot
+$action = New-ScheduledTaskAction -Execute $pwsh -Argument ($argList -join " ") -WorkingDirectory $RepoRoot
 
 $triggers = @(
   (New-ScheduledTaskTrigger -Daily -At 08:00),

@@ -11,7 +11,7 @@
     <key>ProgramArguments</key>
     <array>
       <string>/usr/bin/python3</string>
-      <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/watchdog.py</string>
+      <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/scripts/wechat_article_crawler/watchdog.py</string>
     </array>
 
     <key>StartInterval</key>
