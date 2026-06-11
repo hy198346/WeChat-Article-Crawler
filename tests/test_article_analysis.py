@@ -7,6 +7,14 @@ import article_analysis
 
 
 class TestArticleAnalysis(unittest.TestCase):
+    def test_get_analysis_config_merges_defaults(self):
+        cfg = article_analysis.get_analysis_config(
+            {"analysis_enabled": False, "analysis_timeout_seconds": 9}
+        )
+        self.assertFalse(cfg["analysis_enabled"])
+        self.assertEqual(cfg["analysis_timeout_seconds"], 9)
+        self.assertEqual(cfg["analysis_model"], "qwen2.5-coder:14b-cpu")
+
     def test_analyze_single_article_success_persists_cache(self):
         calls = []
 
@@ -117,6 +125,56 @@ class TestArticleAnalysis(unittest.TestCase):
 
             result = article_analysis.analyze_single_article(config, article)
             self.assertEqual(result["topic"], "缓存命中")
+
+    def test_analyze_single_article_ignores_bad_cache_and_reanalyzes(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0):
+            calls.append((url, json, timeout))
+
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":\"缓存修复后重跑\",\"core_points\":[\"重新分析\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                article = {
+                    "account": "测试号",
+                    "title": "坏缓存文章",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/bad-cache",
+                    "markdown": "body",
+                }
+                config = {
+                    "analysis_enabled": True,
+                    "analysis_output_dir": d,
+                    "analysis_skip_if_exists": True,
+                }
+                article_id = article_analysis.build_article_id(article)
+                cache_dir = Path(d) / "article_analysis"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                (cache_dir / f"{article_id}.json").write_text("{bad json", encoding="utf-8")
+
+                result = article_analysis.analyze_single_article(config, article)
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["topic"], "缓存修复后重跑")
+                self.assertEqual(len(calls), 1)
+        finally:
+            article_analysis.requests.post = old_post
 
     def test_summarize_analysis_batch_success(self):
         calls = []

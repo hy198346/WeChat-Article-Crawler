@@ -51,6 +51,13 @@ def _article_cache_path(config, article_id: str) -> Path:
     return get_analysis_output_root(config) / "article_analysis" / f"{article_id}.json"
 
 
+def _load_cached_analysis(cache_path: Path):
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def _parse_single_analysis(content: str):
     data = json.loads(content)
     return {
@@ -87,7 +94,9 @@ def analyze_single_article(config, article):
         return {"status": "skipped", "reason": "analysis_disabled", "article_id": article_id}
 
     if cfg.get("analysis_skip_if_exists") and cache_path.exists():
-        return json.loads(cache_path.read_text(encoding="utf-8"))
+        cached = _load_cached_analysis(cache_path)
+        if isinstance(cached, dict):
+            return cached
 
     prompt = json.dumps(
         {
