@@ -11,6 +11,7 @@ my_wechat_profile/
 my_wechat_profile_qr/
 debug_refresh_auth/
 logs/
+output/
 .vendor/
 *.log
 .env
@@ -18,6 +19,9 @@ logs/
 !.env.example
 output/ollama_coder/last.json
 output/ollama_coder/last.md
+output/article_analysis/
+output/article_batches/
+docs/superpowers/plans/
 output/wechat_article_crawler_backups/accounts.20260611125806428873.json.bak
 output/wechat_article_crawler_backups/accounts.20260611125808262450.json.bak
 .gitignore

@@ -554,14 +554,15 @@ def send_serverchan_message_once(
                 return {"ok": True, "skipped": True, "reason": "throttled", "age_seconds": age, "dedupe_key": dedupe_key}
     except Exception:
         pass
-    try:
-        stamp.write_text(str(int(now)), encoding="utf-8")
-    except Exception:
-        try:
-            stamp.touch()
-        except Exception:
-            pass
     res = send_serverchan_message(sendkey, title, desp, timeout=timeout)
+    if res.get("ok"):
+        try:
+            stamp.write_text(str(int(now)), encoding="utf-8")
+        except Exception:
+            try:
+                stamp.touch()
+            except Exception:
+                pass
     try:
         res["dedupe_key"] = dedupe_key
     except Exception:

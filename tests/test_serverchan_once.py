@@ -39,7 +39,42 @@ class TestServerChanOnce(unittest.TestCase):
         finally:
             wechat_crawler.send_serverchan_message = old
 
+    def test_failure_does_not_throttle_retry(self):
+        calls = []
+
+        def fake_send(sendkey, title, desp, timeout=20):
+            calls.append((sendkey, title, desp, timeout))
+            if len(calls) == 1:
+                return {"ok": False, "error": "network"}
+            return {"ok": True}
+
+        old = wechat_crawler.send_serverchan_message
+        wechat_crawler.send_serverchan_message = fake_send
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                r1 = wechat_crawler.send_serverchan_message_once(
+                    "k",
+                    "t",
+                    "d",
+                    dedupe_key="auth_expired_detected",
+                    ttl_seconds=3600,
+                    state_dir=d,
+                )
+                r2 = wechat_crawler.send_serverchan_message_once(
+                    "k",
+                    "t",
+                    "d",
+                    dedupe_key="auth_expired_detected",
+                    ttl_seconds=3600,
+                    state_dir=d,
+                )
+                self.assertFalse(r1.get("ok"))
+                self.assertTrue(r2.get("ok"))
+                self.assertEqual(len(calls), 2)
+                self.assertFalse(r2.get("skipped", False))
+        finally:
+            wechat_crawler.send_serverchan_message = old
+
 
 if __name__ == "__main__":
     unittest.main()
-
