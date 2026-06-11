@@ -9,7 +9,12 @@ import sys
 import hashlib
 from pathlib import Path
 
-from article_analysis import render_single_analysis_markdown
+from article_analysis import (
+    analyze_single_article,
+    get_analysis_config,
+    persist_single_analysis_outputs,
+    render_single_analysis_markdown,
+)
 
 # 配置和数据文件路径
 CONFIG_FILE = "config.json"
@@ -578,6 +583,25 @@ def build_serverchan_markdown(article_info):
         lines.extend([analysis_markdown, ""])
     return "\n".join([l for l in lines if l is not None])
 
+
+def _attach_single_article_analysis(config, fetched):
+    cfg = get_analysis_config(config)
+    if not cfg.get("analysis_enabled"):
+        return None
+    analysis = analyze_single_article(
+        config,
+        {
+            "account": fetched.get("account"),
+            "title": fetched.get("title"),
+            "date": fetched.get("date"),
+            "published_at": fetched.get("published_at"),
+            "url": fetched.get("url"),
+            "markdown": fetched.get("markdown", ""),
+        },
+    )
+    persist_single_analysis_outputs(config, analysis)
+    return analysis
+
 def push_article_to_serverchan(config, article_info, override_sendkey=None):
     sendkey = _get_serverchan_sendkey(config, override_sendkey=override_sendkey)
     if not sendkey:
@@ -923,12 +947,14 @@ def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_mark
 
     chosen = best
     fetched = best_fetched
+    analysis = _attach_single_article_analysis(config, fetched)
     payload = {
         "account": fetched["account"],
         "title": fetched["title"],
         "date": fetched["date"],
         "published_at": fetched.get("published_at") or fetched["date"],
-        "url": fetched["url"]
+        "url": fetched["url"],
+        "analysis": analysis,
     }
 
     if push:
@@ -952,12 +978,14 @@ def run_extract_from_url(article_url, account_name=None, save_markdown=False, ou
     }
     article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
     fetched = fetch_article_markdown(article, headers, account_name=account_name)
+    analysis = _attach_single_article_analysis({}, fetched)
     payload = {
         "account": fetched["account"],
         "title": fetched["title"],
         "date": fetched["date"],
         "published_at": fetched.get("published_at") or fetched["date"],
-        "url": fetched["url"]
+        "url": fetched["url"],
+        "analysis": analysis,
     }
 
     if push:

@@ -575,5 +575,121 @@ class TestArticleAnalysisRendering(unittest.TestCase):
         self.assertIn("轮动加快", desp)
 
 
+class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
+    def test_run_extract_from_url_attaches_analysis(self):
+        persist_calls = []
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        old_persist = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
+        try:
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = lambda *args, **kwargs: {"ok": True}
+            wechat_crawler.analyze_single_article = lambda config, article: {
+                "status": "ok",
+                "topic": "主线回暖",
+                "core_points": ["资金回流"],
+                "audience": "短线观察者",
+                "risks": ["持续性待确认"],
+                "article_id": "abc",
+            }
+            wechat_crawler.persist_single_analysis_outputs = (
+                lambda config, analysis: persist_calls.append(analysis["article_id"])
+            )
+
+            payload = wechat_crawler.run_extract_from_url(
+                "https://mp.weixin.qq.com/s/test",
+                account_name="测试号",
+                save_markdown=False,
+                push=False,
+            )
+
+            self.assertEqual(payload["analysis"]["topic"], "主线回暖")
+            self.assertEqual(persist_calls, ["abc"])
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            if old_analyze is not None:
+                wechat_crawler.analyze_single_article = old_analyze
+            if old_persist is not None:
+                wechat_crawler.persist_single_analysis_outputs = old_persist
+
+    def test_run_extract_latest_attaches_analysis(self):
+        persist_calls = []
+
+        old_resolve_fakeid = wechat_crawler.resolve_fakeid
+        old_get_headers = wechat_crawler.get_headers
+        old_get_articles = wechat_crawler.get_articles
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        old_persist = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
+        old_save_md = wechat_crawler.save_url_to_md
+        try:
+            wechat_crawler.resolve_fakeid = lambda *args, **kwargs: "fakeid123"
+            wechat_crawler.get_headers = lambda cookie, token: {"Cookie": cookie}
+            wechat_crawler.get_articles = lambda *args, **kwargs: (
+                [
+                    {
+                        "title": "标题",
+                        "link": "https://mp.weixin.qq.com/s/latest-test",
+                        "create_time": 1710000000,
+                    }
+                ],
+                1,
+                None,
+            )
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = lambda *args, **kwargs: {"ok": True}
+            wechat_crawler.analyze_single_article = lambda config, article: {
+                "status": "ok",
+                "topic": "主线延续",
+                "core_points": ["量能配合"],
+                "audience": "波段跟踪者",
+                "risks": ["高位分歧"],
+                "article_id": "latest-1",
+            }
+            wechat_crawler.persist_single_analysis_outputs = (
+                lambda config, analysis: persist_calls.append(analysis["article_id"])
+            )
+            wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
+
+            payload = wechat_crawler.run_extract_latest(
+                {"token": "t", "cookie": "c", "analysis_enabled": True},
+                account_name_arg="测试号",
+                save_markdown=False,
+                push=False,
+            )
+
+            self.assertEqual(payload["analysis"]["topic"], "主线延续")
+            self.assertEqual(persist_calls, ["latest-1"])
+        finally:
+            wechat_crawler.resolve_fakeid = old_resolve_fakeid
+            wechat_crawler.get_headers = old_get_headers
+            wechat_crawler.get_articles = old_get_articles
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            if old_analyze is not None:
+                wechat_crawler.analyze_single_article = old_analyze
+            if old_persist is not None:
+                wechat_crawler.persist_single_analysis_outputs = old_persist
+            wechat_crawler.save_url_to_md = old_save_md
+
+
 if __name__ == "__main__":
     unittest.main()
