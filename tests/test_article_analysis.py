@@ -124,7 +124,14 @@ class TestArticleAnalysis(unittest.TestCase):
             cache_dir.mkdir(parents=True, exist_ok=True)
             (cache_dir / f"{article_id}.json").write_text(
                 json.dumps(
-                    {"status": "ok", "article_id": article_id, "topic": "缓存命中"},
+                    {
+                        "status": "ok",
+                        "article_id": article_id,
+                        "topic": "缓存命中",
+                        "audience": "缓存读者",
+                        "core_points": ["缓存观点"],
+                        "risks": ["缓存风险"],
+                    },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -132,6 +139,67 @@ class TestArticleAnalysis(unittest.TestCase):
 
             result = article_analysis.analyze_single_article(config, article)
             self.assertEqual(result["topic"], "缓存命中")
+
+    def test_analyze_single_article_ignores_incomplete_ok_cache_and_reanalyzes(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0):
+            calls.append((url, json, timeout))
+
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":\"残缺缓存后重跑\",\"core_points\":[\"重新分析\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                        }
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                article = {
+                    "account": "测试号",
+                    "title": "残缺缓存文章",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/incomplete-cache",
+                    "markdown": "body",
+                }
+                config = {
+                    "analysis_enabled": True,
+                    "analysis_output_dir": d,
+                    "analysis_skip_if_exists": True,
+                }
+                article_id = article_analysis.build_article_id(article)
+                cache_dir = Path(d) / "article_analysis"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                (cache_dir / f"{article_id}.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "article_id": article_id,
+                            "topic": "残缺缓存",
+                            "core_points": ["缺少 audience 和 risks"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                result = article_analysis.analyze_single_article(config, article)
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["topic"], "残缺缓存后重跑")
+                self.assertEqual(len(calls), 1)
+        finally:
+            article_analysis.requests.post = old_post
 
     def test_analyze_single_article_ignores_bad_cache_and_reanalyzes(self):
         calls = []

@@ -65,14 +65,14 @@ def _is_valid_cached_single_analysis(data):
         return False
     if not isinstance(data.get("article_id"), str) or not data.get("article_id").strip():
         return False
-    if not isinstance(data.get("topic"), str):
+    if "topic" not in data or not isinstance(data.get("topic"), str):
         return False
-    if not isinstance(data.get("audience", ""), str):
+    if "audience" not in data or not isinstance(data.get("audience"), str):
         return False
     for field in ("core_points", "risks"):
+        if field not in data:
+            return False
         value = data.get(field)
-        if value is None:
-            continue
         if not isinstance(value, list):
             return False
         if any(not isinstance(item, str) for item in value):
