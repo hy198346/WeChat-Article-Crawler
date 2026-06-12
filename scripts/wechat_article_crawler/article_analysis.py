@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import requests
@@ -8,7 +9,7 @@ import requests
 DEFAULT_ANALYSIS_CONFIG = {
     "analysis_enabled": False,
     "analysis_push_batch": True,
-    "analysis_base_url": "http://127.0.0.1:11434",
+    "analysis_base_url": "http://192.168.9.158:11434",
     "analysis_model": "qwen2.5-coder:14b-cpu",
     "analysis_timeout_seconds": 30,
     "analysis_max_chars": 8000,
@@ -18,10 +19,36 @@ DEFAULT_ANALYSIS_CONFIG = {
 }
 
 
+def _resolve_analysis_base_url(explicit_value):
+    explicit = str(explicit_value or "").strip()
+    if explicit:
+        return explicit
+    for env_name in ("LOCAL_LLM_BASE_URL", "OLLAMA_BASE_URL"):
+        env_value = str(os.environ.get(env_name) or "").strip()
+        if env_value:
+            return env_value
+    return DEFAULT_ANALYSIS_CONFIG["analysis_base_url"]
+
+
+def _resolve_analysis_model(explicit_value):
+    explicit = str(explicit_value or "").strip()
+    if explicit:
+        return explicit
+    for env_name in ("LOCAL_LLM_MODEL", "OLLAMA_MODEL"):
+        env_value = str(os.environ.get(env_name) or "").strip()
+        if env_value:
+            return env_value
+    return DEFAULT_ANALYSIS_CONFIG["analysis_model"]
+
+
 def get_analysis_config(config):
-    merged = dict(DEFAULT_ANALYSIS_CONFIG)
+    explicit = {}
     if isinstance(config, dict):
-        merged.update({key: value for key, value in config.items() if key.startswith("analysis_")})
+        explicit = {key: value for key, value in config.items() if key.startswith("analysis_")}
+    merged = dict(DEFAULT_ANALYSIS_CONFIG)
+    merged.update(explicit)
+    merged["analysis_base_url"] = _resolve_analysis_base_url(explicit.get("analysis_base_url"))
+    merged["analysis_model"] = _resolve_analysis_model(explicit.get("analysis_model"))
     return merged
 
 
@@ -224,8 +251,7 @@ def _parse_single_analysis(content: str):
     }
 
 
-def call_ollama_chat(config, prompt: str):
-    cfg = get_analysis_config(config)
+def _post_native_ollama_chat(cfg, prompt: str):
     response = requests.post(
         cfg["analysis_base_url"].rstrip("/") + "/api/chat",
         json={
@@ -238,6 +264,50 @@ def call_ollama_chat(config, prompt: str):
     response.raise_for_status()
     data = response.json()
     return data.get("message", {}).get("content", "")
+
+
+def _post_openai_compat_chat(cfg, prompt: str):
+    response = requests.post(
+        cfg["analysis_base_url"].rstrip("/") + "/chat/completions",
+        json={
+            "model": cfg["analysis_model"],
+            "temperature": 0,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是微信公众号文章分析助手。严格遵循用户提示中的字段要求，只输出一个 JSON 对象，不要输出 Markdown、解释、代码块或额外文字。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+        },
+        headers={"Authorization": "Bearer ollama"},
+        timeout=cfg["analysis_timeout_seconds"],
+    )
+    response.raise_for_status()
+    data = response.json()
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return message.get("content", "")
+
+
+def call_ollama_chat(config, prompt: str):
+    cfg = get_analysis_config(config)
+    base_url = cfg["analysis_base_url"].rstrip("/")
+    if base_url.endswith("/v1"):
+        return _post_openai_compat_chat(cfg, prompt)
+    try:
+        return _post_native_ollama_chat(cfg, prompt)
+    except requests.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        message = str(exc)
+        if status in (404, 405) or "404" in message or "405" in message:
+            compat_cfg = dict(cfg)
+            compat_cfg["analysis_base_url"] = base_url + "/v1"
+            return _post_openai_compat_chat(compat_cfg, prompt)
+        raise
 
 
 def analyze_single_article(config, article):

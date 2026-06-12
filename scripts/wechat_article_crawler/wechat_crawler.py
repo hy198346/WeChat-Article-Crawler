@@ -190,6 +190,41 @@ def _format_publish_times(ts: int):
         "published_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(t)),
     }
 
+
+def _extract_title_from_html(content_html, fallback="Unknown"):
+    patterns = [
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+name=["\']twitter:title["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<h1[^>]+id=["\']activity-name["\'][^>]*>(.*?)</h1>',
+        r'<title>(.*?)</title>',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content_html, re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        title = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+        if title:
+            return title
+    return fallback or "Unknown"
+
+
+def _extract_account_name_from_html(content_html, fallback="Unknown_Account"):
+    patterns = [
+        r'id="js_name"[^>]*>([^<]+)<',
+        r'var nickname = "([^"]+)"',
+        r'class="profile_meta_value">([^<]+)<',
+        r'class="rich_media_meta_text"[^>]*>([^<]+)<',
+        r'var user_name = "([^"]+)"',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content_html, re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        name = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+        if name:
+            return name
+    return fallback or "Unknown_Account"
+
 def get_headers(cookie, token):
     return {
         "Host": "mp.weixin.qq.com",
@@ -360,6 +395,7 @@ def fetch_article_markdown(article, headers, account_name=None):
     resp = requests.get(url, headers=headers)
     resp.encoding = "utf-8"
     content_html = resp.text
+    title = _extract_title_from_html(content_html, fallback=title)
 
     # 如果 API 没有返回时间，尝试从 HTML 中提取
     if date_str == "Unknown" and published_at == "Unknown":
@@ -465,13 +501,7 @@ def fetch_article_markdown(article, headers, account_name=None):
 
     folder_name = account_name if account_name else "Unknown_Account"
     if folder_name == "Unknown_Account":
-        nick_match = re.search(r'var nickname = "([^"]+)"', content_html)
-        if nick_match:
-            folder_name = nick_match.group(1)
-        elif "profile_meta_nickname" in content_html:
-            nick_match_2 = re.search(r'class="profile_meta_value">([^<]+)<', content_html)
-            if nick_match_2:
-                folder_name = nick_match_2.group(1).strip()
+        folder_name = _extract_account_name_from_html(content_html, fallback=folder_name)
 
     content_match = re.search(r'<div[^>]*id="js_content"[^>]*>(.*?)</div>', content_html, re.DOTALL)
     if content_match:
@@ -768,6 +798,9 @@ def build_serverchan_markdown_articles(articles, batch_analysis=None):
                 lines.append(f"- [{label}]({url})")
             else:
                 lines.append(f"- {label}")
+            analysis_markdown = render_single_analysis_markdown(a.get("analysis"))
+            if analysis_markdown:
+                lines.extend(["", analysis_markdown])
         lines.append("")
 
     batch_markdown = render_batch_analysis_markdown(batch_analysis)
@@ -1061,10 +1094,16 @@ def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_mark
 
 def run_extract_from_url(article_url, account_name=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None):
     config = config or {}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
+    cookie = config.get("cookie")
+    token = config.get("token")
+    if cookie and token:
+        headers = get_headers(cookie, token)
+        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    else:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
     article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
     fetched = fetch_article_markdown(article, headers, account_name=account_name)
     analysis = _attach_single_article_analysis(config, fetched)
@@ -1188,6 +1227,7 @@ def save_url_to_md(article, headers, account_name=None):
         resp = requests.get(url, headers=headers)
         resp.encoding = "utf-8"
         content_html = resp.text
+        title = _extract_title_from_html(content_html, fallback=title)
         
         # 如果 API 没有返回时间，尝试从 HTML 中提取
         if date_str == "Unknown" and published_at == "Unknown":
@@ -1282,14 +1322,7 @@ def save_url_to_md(article, headers, account_name=None):
         folder_name = account_name if account_name else "Unknown_Account"
         
         if folder_name == "Unknown_Account":
-            # Try to extract from HTML var nickname
-            nick_match = re.search(r'var nickname = "([^"]+)"', content_html)
-            if nick_match:
-                folder_name = nick_match.group(1)
-            elif "profile_meta_nickname" in content_html:
-                nick_match_2 = re.search(r'class="profile_meta_value">([^<]+)<', content_html)
-                if nick_match_2:
-                    folder_name = nick_match_2.group(1).strip()
+            folder_name = _extract_account_name_from_html(content_html, fallback=folder_name)
 
         # Create base directory if not exists
         if not os.path.exists(ARTICLES_BASE_DIR):

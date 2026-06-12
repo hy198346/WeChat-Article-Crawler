@@ -1,13 +1,35 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 import article_analysis
+import requests
 import wechat_crawler
 
 
 class TestArticleAnalysis(unittest.TestCase):
+    def setUp(self):
+        self._env_backup = {
+            key: os.environ.get(key)
+            for key in (
+                "LOCAL_LLM_BASE_URL",
+                "OLLAMA_BASE_URL",
+                "LOCAL_LLM_MODEL",
+                "OLLAMA_MODEL",
+            )
+        }
+        for key in self._env_backup:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     def test_get_analysis_config_merges_defaults(self):
         cfg = article_analysis.get_analysis_config(
             {"analysis_enabled": False, "analysis_timeout_seconds": 9}
@@ -16,14 +38,102 @@ class TestArticleAnalysis(unittest.TestCase):
         self.assertTrue(cfg["analysis_push_batch"])
         self.assertEqual(cfg["analysis_timeout_seconds"], 9)
         self.assertEqual(cfg["analysis_model"], "qwen2.5-coder:14b-cpu")
-        self.assertEqual(cfg["analysis_base_url"], "http://127.0.0.1:11434")
+        self.assertEqual(cfg["analysis_base_url"], "http://192.168.9.158:11434")
 
     def test_get_analysis_config_defaults_disable_ai(self):
         cfg = article_analysis.get_analysis_config({})
 
         self.assertFalse(cfg["analysis_enabled"])
         self.assertTrue(cfg["analysis_push_batch"])
-        self.assertEqual(cfg["analysis_base_url"], "http://127.0.0.1:11434")
+        self.assertEqual(cfg["analysis_base_url"], "http://192.168.9.158:11434")
+
+    def test_get_analysis_config_uses_local_llm_base_url_when_missing_explicit(self):
+        old_local = os.environ.get("LOCAL_LLM_BASE_URL")
+        old_ollama = os.environ.get("OLLAMA_BASE_URL")
+        try:
+            os.environ["LOCAL_LLM_BASE_URL"] = "http://192.168.9.158:11434"
+            os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:11434"
+            cfg = article_analysis.get_analysis_config({"analysis_enabled": True, "analysis_base_url": ""})
+            self.assertEqual(cfg["analysis_base_url"], "http://192.168.9.158:11434")
+        finally:
+            if old_local is None:
+                os.environ.pop("LOCAL_LLM_BASE_URL", None)
+            else:
+                os.environ["LOCAL_LLM_BASE_URL"] = old_local
+            if old_ollama is None:
+                os.environ.pop("OLLAMA_BASE_URL", None)
+            else:
+                os.environ["OLLAMA_BASE_URL"] = old_ollama
+
+    def test_get_analysis_config_uses_local_llm_base_url_when_key_absent(self):
+        old_local = os.environ.get("LOCAL_LLM_BASE_URL")
+        try:
+            os.environ["LOCAL_LLM_BASE_URL"] = "http://192.168.9.158:11434/v1"
+            cfg = article_analysis.get_analysis_config({"analysis_enabled": True})
+            self.assertEqual(cfg["analysis_base_url"], "http://192.168.9.158:11434/v1")
+        finally:
+            if old_local is None:
+                os.environ.pop("LOCAL_LLM_BASE_URL", None)
+            else:
+                os.environ["LOCAL_LLM_BASE_URL"] = old_local
+
+    def test_get_analysis_config_prefers_explicit_base_url_over_env(self):
+        old_local = os.environ.get("LOCAL_LLM_BASE_URL")
+        try:
+            os.environ["LOCAL_LLM_BASE_URL"] = "http://192.168.9.158:11434"
+            cfg = article_analysis.get_analysis_config(
+                {"analysis_enabled": True, "analysis_base_url": "http://10.0.0.2:11434"}
+            )
+            self.assertEqual(cfg["analysis_base_url"], "http://10.0.0.2:11434")
+        finally:
+            if old_local is None:
+                os.environ.pop("LOCAL_LLM_BASE_URL", None)
+            else:
+                os.environ["LOCAL_LLM_BASE_URL"] = old_local
+
+    def test_get_analysis_config_uses_local_llm_model_when_missing_explicit(self):
+        old_local_model = os.environ.get("LOCAL_LLM_MODEL")
+        old_ollama_model = os.environ.get("OLLAMA_MODEL")
+        try:
+            os.environ["LOCAL_LLM_MODEL"] = "qwen3:4b"
+            os.environ["OLLAMA_MODEL"] = "ignored:model"
+            cfg = article_analysis.get_analysis_config({"analysis_enabled": True, "analysis_model": ""})
+            self.assertEqual(cfg["analysis_model"], "qwen3:4b")
+        finally:
+            if old_local_model is None:
+                os.environ.pop("LOCAL_LLM_MODEL", None)
+            else:
+                os.environ["LOCAL_LLM_MODEL"] = old_local_model
+            if old_ollama_model is None:
+                os.environ.pop("OLLAMA_MODEL", None)
+            else:
+                os.environ["OLLAMA_MODEL"] = old_ollama_model
+
+    def test_get_analysis_config_uses_local_llm_model_when_key_absent(self):
+        old_local_model = os.environ.get("LOCAL_LLM_MODEL")
+        try:
+            os.environ["LOCAL_LLM_MODEL"] = "qwen3:4b"
+            cfg = article_analysis.get_analysis_config({"analysis_enabled": True})
+            self.assertEqual(cfg["analysis_model"], "qwen3:4b")
+        finally:
+            if old_local_model is None:
+                os.environ.pop("LOCAL_LLM_MODEL", None)
+            else:
+                os.environ["LOCAL_LLM_MODEL"] = old_local_model
+
+    def test_get_analysis_config_prefers_explicit_model_over_env(self):
+        old_local_model = os.environ.get("LOCAL_LLM_MODEL")
+        try:
+            os.environ["LOCAL_LLM_MODEL"] = "qwen3:4b"
+            cfg = article_analysis.get_analysis_config(
+                {"analysis_enabled": True, "analysis_model": "qwen2.5-coder:14b-cpu"}
+            )
+            self.assertEqual(cfg["analysis_model"], "qwen2.5-coder:14b-cpu")
+        finally:
+            if old_local_model is None:
+                os.environ.pop("LOCAL_LLM_MODEL", None)
+            else:
+                os.environ["LOCAL_LLM_MODEL"] = old_local_model
 
     def test_analyze_single_article_success_persists_cache(self):
         calls = []
@@ -91,6 +201,108 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertIn("测试标题", prompt)
                 saved = Path(d) / "article_analysis" / f"{result['article_id']}.json"
                 self.assertTrue(saved.exists())
+        finally:
+            article_analysis.requests.post = old_post
+
+    def test_call_ollama_chat_uses_openai_compat_for_v1_base_url(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"topic\":\"兼容模式\",\"core_points\":[\"走 v1 接口\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                                }
+                            }
+                        ]
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            content = article_analysis.call_ollama_chat(
+                {
+                    "analysis_enabled": True,
+                    "analysis_base_url": "http://192.168.9.158:11434/v1",
+                    "analysis_model": "qwen3:4b",
+                },
+                "测试 prompt",
+            )
+            self.assertEqual(
+                calls[0][0], "http://192.168.9.158:11434/v1/chat/completions"
+            )
+            self.assertEqual(calls[0][1]["temperature"], 0)
+            self.assertEqual(calls[0][1]["messages"][0]["role"], "system")
+            self.assertEqual(calls[0][1]["messages"][1]["role"], "user")
+            self.assertEqual(calls[0][3]["Authorization"], "Bearer ollama")
+            self.assertIn("兼容模式", content)
+        finally:
+            article_analysis.requests.post = old_post
+
+    def test_call_ollama_chat_falls_back_to_openai_compat_when_api_chat_unsupported(self):
+        calls = []
+
+        class HttpError(requests.HTTPError):
+            pass
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+            if url.endswith("/api/chat"):
+                class Resp405:
+                    status_code = 405
+
+                    def raise_for_status(self):
+                        raise HttpError("405 Client Error: Method Not Allowed")
+
+                return Resp405()
+
+            class Resp200:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"topic\":\"自动回退\",\"core_points\":[\"改走 openai compat\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                                }
+                            }
+                        ]
+                    }
+
+            return Resp200()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            content = article_analysis.call_ollama_chat(
+                {
+                    "analysis_enabled": True,
+                    "analysis_base_url": "http://192.168.9.158:11434",
+                    "analysis_model": "qwen3:4b",
+                },
+                "测试 prompt",
+            )
+            self.assertEqual(calls[0][0], "http://192.168.9.158:11434/api/chat")
+            self.assertEqual(
+                calls[1][0], "http://192.168.9.158:11434/v1/chat/completions"
+            )
+            self.assertIn("自动回退", content)
         finally:
             article_analysis.requests.post = old_post
 
@@ -606,6 +818,50 @@ class TestArticleAnalysisRendering(unittest.TestCase):
 
 
 class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
+    def test_fetch_article_markdown_extracts_title_account_and_time_from_html(self):
+        html = """
+        <html>
+          <head>
+            <meta property="og:title" content="测试文章标题" />
+            <meta name="twitter:title" content="测试文章标题" />
+          </head>
+          <body>
+            <script>
+              var user_name = "gh_test_internal_id";
+              var publish_time = "1770811200";
+            </script>
+            <div id="js_name">测试公众号</div>
+            <h1 id="activity-name">测试文章标题</h1>
+            <span class="publish_time">2026-06-12 08:00</span>
+            <div id="js_content"><p>正文内容</p></div>
+          </body>
+        </html>
+        """
+
+        class Resp:
+            text = html
+            encoding = "utf-8"
+
+        old_get = wechat_crawler.requests.get
+        try:
+            wechat_crawler.requests.get = lambda url, headers=None: Resp()
+            fetched = wechat_crawler.fetch_article_markdown(
+                {
+                    "title": "Unknown",
+                    "link": "https://mp.weixin.qq.com/s/test-html",
+                    "create_time": 0,
+                    "digest": "",
+                    "author": "",
+                },
+                headers={"User-Agent": "test"},
+                account_name=None,
+            )
+            self.assertEqual(fetched["title"], "测试文章标题")
+            self.assertEqual(fetched["account"], "测试公众号")
+            self.assertEqual(fetched["published_at"], "2026-06-12 08:00")
+        finally:
+            wechat_crawler.requests.get = old_get
+
     def test_run_extract_from_url_attaches_analysis(self):
         persist_calls = []
 
@@ -652,6 +908,40 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 wechat_crawler.analyze_single_article = old_analyze
             if old_persist is not None:
                 wechat_crawler.persist_single_analysis_outputs = old_persist
+
+    def test_run_extract_from_url_uses_authenticated_headers_from_config(self):
+        captured_headers = []
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        try:
+            def fake_fetch(article, headers, account_name=None):
+                captured_headers.append(headers)
+                return {
+                    "account": "测试号",
+                    "title": "标题",
+                    "date": "2026-06-11",
+                    "published_at": "2026-06-11 21:30",
+                    "url": article["link"],
+                    "markdown": "# 标题\n\n正文",
+                }
+
+            wechat_crawler.fetch_article_markdown = fake_fetch
+            wechat_crawler.analyze_single_article = lambda config, article: None
+
+            wechat_crawler.run_extract_from_url(
+                "https://mp.weixin.qq.com/s/test-auth",
+                save_markdown=False,
+                push=False,
+                config={"cookie": "cookie=test", "token": "123456"},
+            )
+
+            self.assertEqual(captured_headers[0]["Cookie"], "cookie=test")
+            self.assertIn("token=123456", captured_headers[0]["Referer"])
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            if old_analyze is not None:
+                wechat_crawler.analyze_single_article = old_analyze
 
     def test_run_extract_from_url_passes_real_config_and_skips_analysis_when_disabled(self):
         analyze_calls = []
@@ -829,6 +1119,31 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         self.assertIn("本轮解读", desp)
         self.assertIn("情绪修复", desp)
         self.assertIn("资金回流", desp)
+
+    def test_build_serverchan_markdown_articles_renders_per_article_analysis(self):
+        desp = wechat_crawler.build_serverchan_markdown_articles(
+            [
+                {
+                    "account": "号A",
+                    "group": "测试分组",
+                    "title": "A 文",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/a",
+                    "analysis": {
+                        "status": "ok",
+                        "topic": "单篇主题",
+                        "core_points": ["观点一", "观点二"],
+                        "audience": "测试者",
+                        "risks": ["风险一"],
+                    },
+                }
+            ],
+            batch_analysis=None,
+        )
+
+        self.assertIn("AI解读", desp)
+        self.assertIn("单篇主题", desp)
+        self.assertIn("观点一", desp)
 
     def test_run_push_latest_all_skips_batch_analysis_when_disabled(self):
         old_load_accounts = wechat_crawler.load_accounts_list
