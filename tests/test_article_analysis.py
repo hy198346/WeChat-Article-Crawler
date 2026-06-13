@@ -1,7 +1,7 @@
-import hashlib
 import http.client
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -1245,6 +1245,21 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             return index_path.read_text(encoding="utf-8")
         return ""
 
+    def _read_generated_account_pages(self, output_root: str) -> dict[str, str]:
+        accounts_dir = Path(output_root) / "article_analysis" / "accounts"
+        if not accounts_dir.exists():
+            return {}
+        return {
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted(accounts_dir.glob("*.html"))
+        }
+
+    def _find_account_page(self, output_root: str, account: str):
+        for name, html in self._read_generated_account_pages(output_root).items():
+            if account in html:
+                return name, html
+        return None, ""
+
     def test_load_account_categories_from_doc(self):
         func = getattr(article_analysis, "_load_account_categories", None)
         self.assertTrue(callable(func))
@@ -1397,11 +1412,11 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             )
 
             html = self._build_and_read_index_html(d)
-            anchor = article_analysis._account_anchor_id("目录测试号")
+            page_href = article_analysis._account_page_relative_path("目录测试号")
 
             self.assertRegex(
                 html,
-                rf'<a class="directory-link" href="#{anchor}">目录测试号（1）｜最新：2026-06-12 10:00｜标题：目录最新标题</a>',
+                rf'<a class="directory-link" href="{re.escape(page_href)}">目录测试号（1）｜最新：2026-06-12 10:00｜标题：目录最新标题</a>',
             )
 
     def test_build_analysis_index_html_directory_item_shows_title_with_mtime_fallback(self):
@@ -1426,14 +1441,14 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             os.utime(entry_path, (1760000000, 1760000000))
 
             html = self._build_and_read_index_html(d)
-            anchor = article_analysis._account_anchor_id("无时间目录号")
+            page_href = article_analysis._account_page_relative_path("无时间目录号")
             expected = article_analysis.datetime.fromtimestamp(1760000000).strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
 
             self.assertRegex(
                 html,
-                rf'<a class="directory-link" href="#{anchor}">无时间目录号（1）｜最新：{expected}｜标题：只有标题也要显示</a>',
+                rf'<a class="directory-link" href="{re.escape(page_href)}">无时间目录号（1）｜最新：{expected}｜标题：只有标题也要显示</a>',
             )
 
     def test_format_latest_time_falls_back_to_mtime_for_invalid_date_text(self):
@@ -1565,7 +1580,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "结构化摘要号")
 
             self.assertIn('class="summary-block"', html)
             self.assertIn('class="summary-section-title"', html)
@@ -1643,26 +1659,436 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             )
 
             html = self._build_and_read_index_html(d)
-            account_a_anchor = hashlib.sha1("号A".encode("utf-8")).hexdigest()[:12]
-            account_b_anchor = hashlib.sha1("号B".encode("utf-8")).hexdigest()[:12]
+            _, account_a_html = self._find_account_page(d, "号A")
+            _, account_b_html = self._find_account_page(d, "号B")
 
             self.assertIn("号A", html)
             self.assertIn("号B", html)
-            self.assertIn("A 新", html)
-            self.assertIn("A 旧", html)
-            self.assertIn("A主题", html)
-            self.assertIn("A旧主题", html)
-            self.assertIn("B主题", html)
             self.assertIn("公众号目录", html)
-            self.assertIn(f'href="#account-{account_a_anchor}"', html)
-            self.assertIn(f'href="#account-{account_b_anchor}"', html)
-            self.assertIn(f'id="account-{account_a_anchor}"', html)
-            self.assertIn(f'id="account-{account_b_anchor}"', html)
+            self.assertIn(f'href="{article_analysis._account_page_relative_path("号A")}"', html)
+            self.assertIn(f'href="{article_analysis._account_page_relative_path("号B")}"', html)
             self.assertLess(html.find("号A"), html.find("号B"))
-            self.assertLess(html.find("A 新"), html.find("A 旧"))
-            self.assertTrue(self._is_inside_details(html, "A 旧"))
-            self.assertFalse(self._is_inside_details(html, "A 新"))
-            self.assertFalse(self._is_inside_details(html, "B 单篇"))
+            self.assertIn("A 新", html)
+            self.assertIn("B 单篇", html)
+            self.assertNotIn("A 旧", html)
+            self.assertNotIn("A主题", html)
+            self.assertNotIn("A旧主题", html)
+            self.assertNotIn("B主题", html)
+            self.assertIn("A 新", account_a_html)
+            self.assertIn("A 旧", account_a_html)
+            self.assertIn("A主题", account_a_html)
+            self.assertIn("A旧主题", account_a_html)
+            self.assertIn("B主题", account_b_html)
+            self.assertLess(account_a_html.find("A 新"), account_a_html.find("A 旧"))
+            self.assertTrue(self._is_inside_details(account_a_html, "A 旧"))
+            self.assertFalse(self._is_inside_details(account_a_html, "A 新"))
+            self.assertFalse(self._is_inside_details(account_b_html, "B 单篇"))
+
+    def test_build_analysis_index_html_directory_page_only_shows_directory_links(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "account-only-directory",
+                        "account": "目录专用号",
+                        "title": "目录页不应展示正文",
+                        "url": "https://mp.weixin.qq.com/s/directory-only",
+                        "published_at": "2026-06-13 09:30",
+                        "summary": "这里只应该出现在单公众号页",
+                        "topic": "目录主题",
+                        "core_points": ["目录观点"],
+                        "audience": "目录读者",
+                        "risks": ["目录风险"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (root / "second.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "account-only-directory-2",
+                        "account": "第二目录号",
+                        "title": "目录第二条",
+                        "url": "https://mp.weixin.qq.com/s/directory-only-2",
+                        "published_at": "2026-06-13 08:30",
+                        "summary": "第二条正文也不应出现在目录页",
+                        "topic": "第二目录主题",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            html = self._build_and_read_index_html(d)
+            page_names = sorted(self._read_generated_account_pages(d))
+            linked_pages = sorted(set(re.findall(r'href="accounts/([^"]+\.html)"', html)))
+
+            self.assertIn("公众号目录", html)
+            self.assertIn("目录专用号（1）｜最新：2026-06-13 09:30｜标题：目录页不应展示正文", html)
+            self.assertIn("第二目录号（1）｜最新：2026-06-13 08:30｜标题：目录第二条", html)
+            self.assertEqual(linked_pages, page_names)
+            self.assertNotIn('class="item"', html)
+            self.assertNotIn('class="reanalyze-button"', html)
+            self.assertNotIn('class="back-link"', html)
+            self.assertNotIn('href="#', html)
+            self.assertNotIn("<details>", html)
+            self.assertNotIn('href="https://mp.weixin.qq.com/s/directory-only"', html)
+            self.assertNotIn('href="https://mp.weixin.qq.com/s/directory-only-2"', html)
+            self.assertNotIn("这里只应该出现在单公众号页", html)
+            self.assertNotIn("第二条正文也不应出现在目录页", html)
+            self.assertNotIn("目录主题", html)
+            self.assertNotIn("目录观点", html)
+            self.assertNotIn("第二目录主题", html)
+
+    def test_build_analysis_index_html_generates_single_account_pages(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "focus_latest.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "focus-latest",
+                        "account": "单页目标号",
+                        "title": "最新解读",
+                        "url": "https://mp.weixin.qq.com/s/focus-latest",
+                        "published_at": "2026-06-13 10:00",
+                        "summary": "最新一条完整解读",
+                        "topic": "最新主题",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (root / "focus_other.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "focus-other",
+                        "account": "另一个号",
+                        "title": "其他账号文章",
+                        "url": "https://mp.weixin.qq.com/s/focus-other",
+                        "published_at": "2026-06-13 09:00",
+                        "summary": "其他账号解读",
+                        "topic": "其他主题",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            page_name, account_html = self._find_account_page(d, "单页目标号")
+
+            self.assertTrue(page_name, "应生成单公众号页面")
+            self.assertTrue(page_name.endswith(".html"))
+            self.assertIn("单页目标号", account_html)
+            self.assertIn("最新解读", account_html)
+            self.assertIn("最新一条完整解读", account_html)
+            self.assertIn('href="../index.html"', account_html)
+            self.assertIn(
+                'href="https://mp.weixin.qq.com/s/focus-latest"',
+                account_html,
+            )
+            self.assertIn('class="reanalyze-button"', account_html)
+            self.assertIn('data-article-id="focus-latest"', account_html)
+            self.assertIn('data-url="https://mp.weixin.qq.com/s/focus-latest"', account_html)
+            self.assertNotIn("另一个号", account_html)
+            self.assertNotIn("其他账号文章", account_html)
+
+    def test_build_analysis_index_html_uses_relative_links_for_directory_and_account_pages(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "relative-links-entry",
+                        "account": "相对链接号",
+                        "title": "相对链接文章",
+                        "url": "https://mp.weixin.qq.com/s/relative-links-entry",
+                        "published_at": "2026-06-13 10:00",
+                        "summary": "相对链接解读",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            html = self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "相对链接号")
+            page_href = article_analysis._account_page_relative_path("相对链接号")
+
+            self.assertIn(f'href="{page_href}"', html)
+            self.assertNotIn(f'href="#{article_analysis._account_anchor_id("相对链接号")}"', html)
+            self.assertNotIn(f'href="/article_analysis/{page_href}"', html)
+            self.assertNotIn(f'href="http://localhost:8765/article_analysis/{page_href}"', html)
+            self.assertIn('href="../index.html"', account_html)
+            self.assertNotIn('href="/article_analysis/index.html"', account_html)
+            self.assertNotIn('href="http://localhost:8765/article_analysis/index.html"', account_html)
+
+    def test_build_analysis_index_html_history_items_collapse_one_by_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            entries = [
+                {
+                    "path": "latest.json",
+                    "article_id": "history-latest",
+                    "account": "逐条折叠号",
+                    "title": "最新文章",
+                    "url": "https://mp.weixin.qq.com/s/history-latest",
+                    "published_at": "2026-06-13 10:00",
+                    "summary": "最新文章完整解读",
+                },
+                {
+                    "path": "history-1.json",
+                    "article_id": "history-1",
+                    "account": "逐条折叠号",
+                    "title": "历史文章一",
+                    "url": "https://mp.weixin.qq.com/s/history-1",
+                    "published_at": "2026-06-12 10:00",
+                    "summary": "历史文章一完整解读",
+                },
+                {
+                    "path": "history-2.json",
+                    "article_id": "history-2",
+                    "account": "逐条折叠号",
+                    "url": "https://mp.weixin.qq.com/s/history-2",
+                    "published_at": "2026-06-11 09:00",
+                    "summary": "历史文章二完整解读",
+                    "topic": "缺标题时仍需折叠",
+                },
+            ]
+            for entry in entries:
+                payload = dict(entry)
+                path = payload.pop("path")
+                (root / path).write_text(
+                    json.dumps({"status": "ok", **payload}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+            self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "逐条折叠号")
+
+            self.assertIn("最新文章完整解读", account_html)
+            self.assertEqual(account_html.count("<details"), 2)
+            self.assertNotIn("<summary>历史解读</summary>", account_html)
+            self.assertIn("<summary>2026-06-12 10:00｜历史文章一</summary>", account_html)
+            self.assertIn("<summary>2026-06-11 09:00｜(无标题)</summary>", account_html)
+            self.assertTrue(self._is_inside_details(account_html, "历史文章一完整解读"))
+            self.assertTrue(self._is_inside_details(account_html, "历史文章二完整解读"))
+            self.assertFalse(self._is_inside_details(account_html, "最新文章完整解读"))
+
+    def test_build_analysis_index_html_history_summary_labels_do_not_include_full_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "latest.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "history-summary-latest",
+                        "account": "历史摘要号",
+                        "title": "最新文章",
+                        "url": "https://mp.weixin.qq.com/s/history-summary-latest",
+                        "published_at": "2026-06-13 10:00",
+                        "summary": "最新文章完整解读",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            history_summary = "这段历史全文只应在展开后出现，不应泄露到折叠标题"
+            (root / "history.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "history-summary-history",
+                        "account": "历史摘要号",
+                        "title": "历史文章",
+                        "url": "https://mp.weixin.qq.com/s/history-summary-history",
+                        "published_at": "2026-06-12 09:00",
+                        "summary": history_summary,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "历史摘要号")
+            summary_labels = re.findall(r"<summary>(.*?)</summary>", account_html)
+
+            self.assertIn("2026-06-12 09:00｜历史文章", summary_labels)
+            self.assertEqual(account_html.count(history_summary), 1)
+            self.assertTrue(self._is_inside_details(account_html, history_summary))
+            self.assertNotIn(history_summary, "".join(summary_labels))
+
+    def test_build_analysis_index_html_removes_stale_account_pages_after_second_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "first.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "first-account-entry",
+                        "account": "第一轮账号",
+                        "title": "第一轮文章",
+                        "url": "https://mp.weixin.qq.com/s/first-account-entry",
+                        "published_at": "2026-06-13 10:00",
+                        "summary": "第一轮解读",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            stale_page_path = (
+                Path(d)
+                / "article_analysis"
+                / article_analysis._account_page_relative_path("第一轮账号")
+            )
+            self.assertTrue(stale_page_path.exists())
+
+            (root / "first.json").unlink()
+            (root / "second.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "second-account-entry",
+                        "account": "第二轮账号",
+                        "title": "第二轮文章",
+                        "url": "https://mp.weixin.qq.com/s/second-account-entry",
+                        "published_at": "2026-06-13 11:00",
+                        "summary": "第二轮解读",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            html = self._build_and_read_index_html(d)
+
+            self.assertFalse(stale_page_path.exists())
+            self.assertIn(
+                f'href="{article_analysis._account_page_relative_path("第二轮账号")}"',
+                html,
+            )
+            self.assertNotIn(
+                f'href="{article_analysis._account_page_relative_path("第一轮账号")}"',
+                html,
+            )
+
+    def test_build_analysis_index_html_second_build_directory_links_match_current_account_pages(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "alpha.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "alpha-entry",
+                        "account": "Alpha号",
+                        "title": "Alpha文章",
+                        "url": "https://mp.weixin.qq.com/s/alpha-entry",
+                        "published_at": "2026-06-13 09:00",
+                        "summary": "Alpha解读",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (root / "beta.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "beta-entry",
+                        "account": "Beta号",
+                        "title": "Beta文章",
+                        "url": "https://mp.weixin.qq.com/s/beta-entry",
+                        "published_at": "2026-06-13 10:00",
+                        "summary": "Beta解读",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+
+            (root / "alpha.json").unlink()
+            html = self._build_and_read_index_html(d)
+            page_names = sorted(self._read_generated_account_pages(d))
+            linked_pages = sorted(set(re.findall(r'href="accounts/([^"]+\.html)"', html)))
+
+            self.assertEqual(linked_pages, page_names)
+            self.assertEqual(
+                linked_pages,
+                [Path(article_analysis._account_page_relative_path("Beta号")).name],
+            )
+
+    def test_build_analysis_index_html_generates_distinct_account_pages_when_slug_collides(self):
+        old_account_slug = article_analysis._account_slug
+        try:
+            article_analysis._account_slug = lambda account: "dup-slug"
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d) / "article_analysis"
+                root.mkdir(parents=True, exist_ok=True)
+                (root / "a.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "article_id": "slug-collision-a",
+                            "account": "冲突账号A",
+                            "title": "A文章",
+                            "url": "https://mp.weixin.qq.com/s/slug-collision-a",
+                            "published_at": "2026-06-13 09:00",
+                            "summary": "A解读",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                (root / "b.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "article_id": "slug-collision-b",
+                            "account": "冲突账号B",
+                            "title": "B文章",
+                            "url": "https://mp.weixin.qq.com/s/slug-collision-b",
+                            "published_at": "2026-06-13 10:00",
+                            "summary": "B解读",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                html = self._build_and_read_index_html(d)
+                page_map = self._read_generated_account_pages(d)
+                page_a_name, page_a_html = self._find_account_page(d, "冲突账号A")
+                page_b_name, page_b_html = self._find_account_page(d, "冲突账号B")
+
+                self.assertEqual(len(page_map), 2)
+                self.assertTrue(page_a_name)
+                self.assertTrue(page_b_name)
+                self.assertNotEqual(page_a_name, page_b_name)
+                self.assertIn("冲突账号A", page_a_html)
+                self.assertIn("冲突账号B", page_b_html)
+                self.assertIn(f'href="accounts/{page_a_name}"', html)
+                self.assertIn(f'href="accounts/{page_b_name}"', html)
+        finally:
+            article_analysis._account_slug = old_account_slug
 
     def test_build_analysis_index_html_prefers_latest_topic_for_same_url_even_if_old_has_more_points(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1705,7 +2131,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
 
             self.assertIn("新主题", html)
             self.assertIn("新标题", html)
@@ -1737,8 +2164,9 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             (root / "bad.json").write_text("{bad json", encoding="utf-8")
 
             html = self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "号A")
 
-            self.assertIn("可用条目", html)
+            self.assertIn("可用条目", account_html)
             self.assertNotIn("bad.json", html)
             self.assertNotIn("{bad json", html)
             self.assertNotIn("bad json", html)
@@ -1761,7 +2189,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "Unknown_Account")
 
             self.assertIn("Unknown_Account", html)
             self.assertIn("(无标题)", html)
@@ -1829,7 +2258,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "Unknown_Account")
 
             self.assertIn("Unknown_Account", html)
             self.assertNotIn("gh_2ba2404c01c0", html)
@@ -1870,7 +2300,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "差评X.PIN")
 
             self.assertIn("差评X.PIN", html)
             self.assertIn("正确文章", html)
@@ -1900,7 +2331,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
 
             self.assertIn('const REANALYZE_API_URL = "/api/reanalyze";', html)
             self.assertNotIn("http://127.0.0.1:8766/api/reanalyze", html)
@@ -1932,7 +2364,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
 
             self.assertIn('setReanalyzeStatus(button, "重新解读失败，请稍后重试", "is-error");', html)
             self.assertNotIn("重新解读失败：${message}", html)
@@ -1969,7 +2402,7 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                     "analysis_reanalyze_path": "/api/reanalyze",
                 }
             )
-            html = (root / "index.html").read_text(encoding="utf-8")
+            _, html = self._find_account_page(d, "号A")
 
             self.assertIn("https://wx.coco777.vip/api/reanalyze", html)
             self.assertNotIn("http://127.0.0.1:8766/api/reanalyze", html)
@@ -2002,7 +2435,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
 
             self.assertIn('.reanalyze-button.is-busy{', html)
             self.assertIn('.reanalyze-status.is-success{', html)
@@ -2058,7 +2492,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            html = self._build_and_read_index_html(d)
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
 
             self.assertIn("失败文章", html)
             self.assertIn('data-article-id="failed-entry"', html)

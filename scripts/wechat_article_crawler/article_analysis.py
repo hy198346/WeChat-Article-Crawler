@@ -821,6 +821,42 @@ def _account_anchor_id(account: str) -> str:
     return "account-" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
+def _account_slug(account: str) -> str:
+    text = _normalize_account_name(account)
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _account_page_relative_path(account: str) -> str:
+    return f"accounts/{_account_slug(account)}.html"
+
+
+def _account_page_path(analysis_dir: Path, account: str, relative_path: Optional[str] = None) -> Path:
+    normalized_relative_path = _normalize_scalar_string(relative_path)
+    if normalized_relative_path:
+        return analysis_dir / normalized_relative_path
+    return analysis_dir / "accounts" / f"{_account_slug(account)}.html"
+
+
+def _resolve_account_page_relative_paths(accounts):
+    grouped_accounts = {}
+    for account in accounts or []:
+        normalized_account = _normalize_account_name(account)
+        base_slug = _account_slug(normalized_account)
+        grouped_accounts.setdefault(base_slug, [])
+        if normalized_account not in grouped_accounts[base_slug]:
+            grouped_accounts[base_slug].append(normalized_account)
+
+    resolved = {}
+    for base_slug, account_names in grouped_accounts.items():
+        if len(account_names) == 1:
+            resolved[account_names[0]] = f"accounts/{base_slug}.html"
+            continue
+        for account_name in sorted(account_names):
+            suffix = hashlib.sha1(account_name.encode("utf-8")).hexdigest()[:8]
+            resolved[account_name] = f"accounts/{base_slug}-{suffix}.html"
+    return resolved
+
+
 def _should_skip_index_item(item: dict) -> bool:
     account = _normalize_account_name(item.get("account"))
     title = _normalize_scalar_string(item.get("title"))
@@ -905,6 +941,185 @@ def _resolve_reanalyze_api_url(config) -> str:
     return f"{base_url}{path}" if base_url else path
 
 
+def _analysis_page_style_lines():
+    return [
+        "html{background:#ffffff;}",
+        "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;max-width:960px;margin:0 auto;padding:20px;line-height:1.5;background:#ffffff;color:#24292f;}",
+        "h1{margin:0 0 16px 0;}",
+        "h2{margin:24px 0 12px 0;padding-bottom:6px;border-bottom:1px solid #eee;}",
+        ".subtitle{color:#666;font-size:12px;margin:-6px 0 18px 0;}",
+        ".directory{margin:0 0 20px 0;padding:14px 16px;background:#f6f8fa;border:1px solid #e5e7eb;border-radius:10px;}",
+        ".directory-title{font-weight:600;margin-bottom:10px;}",
+        ".directory-group{margin-top:12px;}",
+        ".directory-group-title{font-size:13px;font-weight:600;color:#57606a;margin-bottom:8px;}",
+        ".directory-list{display:flex;flex-wrap:wrap;gap:8px 10px;}",
+        ".directory-link{display:inline-block;padding:4px 10px;border-radius:999px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;}",
+        ".directory-link:hover{text-decoration:none;background:#f0f7ff;}",
+        ".account-meta{color:#666;font-weight:400;font-size:12px;margin-left:8px;}",
+        ".back-link{display:inline-block;margin-bottom:12px;color:#0969da;text-decoration:none;font-size:13px;}",
+        ".back-link:hover{text-decoration:underline;}",
+        ".item{padding:10px 0;border-bottom:1px dashed #eee;}",
+        ".title{font-weight:600;}",
+        ".meta{color:#666;font-size:12px;margin-top:4px;}",
+        ".actions{display:flex;align-items:center;gap:10px;margin-top:8px;}",
+        ".reanalyze-button{border:1px solid #d0d7de;background:#f6f8fa;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:12px;}",
+        ".reanalyze-button[disabled]{cursor:not-allowed;opacity:0.55;}",
+        ".reanalyze-status{color:#666;font-size:12px;}",
+        ".reanalyze-button.is-busy{opacity:0.75;cursor:progress;}",
+        ".reanalyze-status.is-success{color:#1a7f37;}",
+        ".reanalyze-status.is-error{color:#cf222e;}",
+        ".label{color:#666;font-size:12px;margin-top:6px;}",
+        ".field{margin-top:6px;}",
+        ".summary-inline{display:inline;}",
+        ".summary-block{display:block;margin-top:4px;}",
+        ".summary-section-title{font-weight:600;color:#24292f;margin-top:8px;}",
+        ".summary-subsection-title{font-weight:600;color:#57606a;margin-top:6px;}",
+        ".summary-paragraph{margin:6px 0 0 0;line-height:1.6;}",
+        ".summary-list{margin:6px 0 0 18px;padding:0;}",
+        ".summary-list li{margin-top:4px;line-height:1.6;}",
+        ".points,.risks{margin:6px 0 0 18px;}",
+        ".history-title{margin-top:20px;font-weight:600;color:#24292f;}",
+        "details{margin-top:10px;}",
+        "summary{cursor:pointer;color:#444;}",
+    ]
+
+
+def _render_page_start(title: str):
+    return [
+        "<!doctype html>",
+        '<html lang="zh-CN">',
+        "<head>",
+        '<meta charset="utf-8" />',
+        '<meta name="color-scheme" content="light" />',
+        f"<title>{html_escape(title)}</title>",
+        "<style>",
+        *_analysis_page_style_lines(),
+        "</style>",
+        "</head>",
+        "<body>",
+    ]
+
+
+def _render_reanalyze_script_html(config):
+    reanalyze_api_url = _resolve_reanalyze_api_url(config)
+    return [
+        "<script>",
+        f"const REANALYZE_API_URL = {json.dumps(reanalyze_api_url, ensure_ascii=False)};",
+        "function setReanalyzeStatus(button, text, state) {",
+        '  const status = button.parentElement ? button.parentElement.querySelector(".reanalyze-status") : null;',
+        "  if (!status) return;",
+        "  status.textContent = text || '';",
+        '  status.classList.remove("is-success", "is-error");',
+        "  if (state) {",
+        "    status.classList.add(state);",
+        "  }",
+        "}",
+        'document.querySelectorAll(".reanalyze-button").forEach((button) => {',
+        "  if (button.disabled) return;",
+        '  button.addEventListener("click", async () => {',
+        '    const articleId = button.getAttribute("data-article-id") || "";',
+        '    const url = button.getAttribute("data-url") || "";',
+        "    if (!url) {",
+        '      setReanalyzeStatus(button, "缺少原文链接，无法重解读");',
+        "      return;",
+        "    }",
+        "    button.disabled = true;",
+        '    button.classList.add("is-busy");',
+        '    setReanalyzeStatus(button, "重新解读中...");',
+        "    try {",
+        "      const response = await fetch(REANALYZE_API_URL, {",
+        '        method: "POST",',
+        '        headers: {"Content-Type": "application/json"},',
+        "        body: JSON.stringify({article_id: articleId, url}),",
+        "      });",
+        "      const payload = await response.json();",
+        "      if (!response.ok || payload.status !== 'ok') {",
+        "        throw new Error('reanalyze_failed');",
+        "      }",
+        '      setReanalyzeStatus(button, "重新解读成功，正在刷新...", "is-success");',
+        "      window.setTimeout(() => window.location.reload(), 800);",
+        "    } catch (error) {",
+        '      setReanalyzeStatus(button, "重新解读失败，请稍后重试", "is-error");',
+        "      button.disabled = false;",
+        '      button.classList.remove("is-busy");',
+        "    }",
+        "  });",
+        "});",
+        "</script>",
+    ]
+
+
+def _render_history_summary_label(item: dict) -> str:
+    date_text = _normalize_scalar_string(item.get("published_at")) or _normalize_scalar_string(item.get("date"))
+    if not date_text:
+        date_text = _format_latest_time(item)
+    title = _normalize_scalar_string(item.get("title")) or "(无标题)"
+    return f"{date_text}｜{title}" if date_text else title
+
+
+def _render_account_page_html(
+    config,
+    analysis_dir: Path,
+    account: str,
+    sorted_items,
+    generated_at: str,
+    page_relative_path: Optional[str] = None,
+) -> str:
+    if not sorted_items:
+        return ""
+    latest_item = sorted_items[0]
+    latest_time = _format_latest_time(latest_item)
+    page_parts = _render_page_start(f"{account} - 公众号 AI 解读")
+    count = len(sorted_items)
+    subtitle = f"生成时间：{generated_at} ｜ 篇数：{count}"
+    if latest_time:
+        subtitle = f"{subtitle} ｜ 最新：{latest_time}"
+    page_parts.extend(
+        [
+            '<a class="back-link" href="../index.html">返回目录</a>',
+            f"<h1>{html_escape(account)}</h1>",
+            f'<div class="subtitle">{html_escape(subtitle)}</div>',
+            _render_analysis_item_html(latest_item),
+        ]
+    )
+    history = sorted_items[1:]
+    if history:
+        page_parts.append('<div class="history-title">历史文章</div>')
+        for item in history:
+            page_parts.append("<details>")
+            page_parts.append(f"<summary>{html_escape(_render_history_summary_label(item))}</summary>")
+            page_parts.append(_render_analysis_item_html(item))
+            page_parts.append("</details>")
+    page_parts.extend(_render_reanalyze_script_html(config))
+    page_parts.extend(["</body>", "</html>"])
+    content = "\n".join(page_parts) + "\n"
+    relative_path = _normalize_scalar_string(page_relative_path) or _account_page_relative_path(account)
+    page_path = _account_page_path(analysis_dir, account, relative_path)
+    if not _safe_write_text(page_path, content):
+        print(f"{_now_text()} failed to write account analysis html: {page_path}")
+    return content
+
+
+def _cleanup_stale_account_pages(analysis_dir: Path, active_relative_paths):
+    accounts_dir = analysis_dir / "accounts"
+    active_names = {
+        Path(str(relative_path)).name
+        for relative_path in (active_relative_paths or [])
+        if str(relative_path).strip()
+    }
+    try:
+        existing_paths = list(accounts_dir.glob("*.html"))
+    except OSError:
+        return
+    for path in existing_paths:
+        if path.name in active_names:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
 def build_analysis_index_html(config):
     if isinstance(config, (str, Path)):
         output_root = Path(config)
@@ -983,6 +1198,9 @@ def build_analysis_index_html(config):
         account_entries.append((account, latest_key, sorted_items))
 
     account_entries.sort(key=lambda entry: entry[1], reverse=True)
+    account_page_paths = _resolve_account_page_relative_paths(
+        [account for account, _latest_key, _sorted_items in account_entries]
+    )
 
     category_map, category_order = _resolve_account_categories(output_root)
     if not category_order:
@@ -1002,6 +1220,7 @@ def build_analysis_index_html(config):
             {
                 "account": account,
                 "anchor_id": _account_anchor_id(account),
+                "page_href": account_page_paths.get(account, _account_page_relative_path(account)),
                 "count": len(sorted_items),
                 "latest_time": latest_time,
                 "latest_title": latest_title,
@@ -1014,57 +1233,19 @@ def build_analysis_index_html(config):
     generated_at = _now_text()
     total_accounts = len(account_entries)
     total_analyses = len(deduped_items)
-    reanalyze_api_url = _resolve_reanalyze_api_url(config)
-
-    html_parts = [
-        "<!doctype html>",
-        '<html lang="zh-CN">',
-        "<head>",
-        '<meta charset="utf-8" />',
-        '<meta name="color-scheme" content="light" />',
-        "<title>公众号 AI 解读汇总</title>",
-        "<style>",
-        "html{background:#ffffff;}",
-        "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;max-width:960px;margin:0 auto;padding:20px;line-height:1.5;background:#ffffff;color:#24292f;}",
-        "h1{margin:0 0 16px 0;}",
-        "h2{margin:24px 0 12px 0;padding-bottom:6px;border-bottom:1px solid #eee;}",
-        ".subtitle{color:#666;font-size:12px;margin:-6px 0 18px 0;}",
-        ".directory{margin:0 0 20px 0;padding:14px 16px;background:#f6f8fa;border:1px solid #e5e7eb;border-radius:10px;}",
-        ".directory-title{font-weight:600;margin-bottom:10px;}",
-        ".directory-group{margin-top:12px;}",
-        ".directory-group-title{font-size:13px;font-weight:600;color:#57606a;margin-bottom:8px;}",
-        ".directory-list{display:flex;flex-wrap:wrap;gap:8px 10px;}",
-        ".directory-link{display:inline-block;padding:4px 10px;border-radius:999px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;}",
-        ".directory-link:hover{text-decoration:none;background:#f0f7ff;}",
-        ".account-meta{color:#666;font-weight:400;font-size:12px;margin-left:8px;}",
-        ".item{padding:10px 0;border-bottom:1px dashed #eee;}",
-        ".title{font-weight:600;}",
-        ".meta{color:#666;font-size:12px;margin-top:4px;}",
-        ".actions{display:flex;align-items:center;gap:10px;margin-top:8px;}",
-        ".reanalyze-button{border:1px solid #d0d7de;background:#f6f8fa;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:12px;}",
-        ".reanalyze-button[disabled]{cursor:not-allowed;opacity:0.55;}",
-        ".reanalyze-status{color:#666;font-size:12px;}",
-        ".reanalyze-button.is-busy{opacity:0.75;cursor:progress;}",
-        ".reanalyze-status.is-success{color:#1a7f37;}",
-        ".reanalyze-status.is-error{color:#cf222e;}",
-        ".label{color:#666;font-size:12px;margin-top:6px;}",
-        ".field{margin-top:6px;}",
-        ".summary-inline{display:inline;}",
-        ".summary-block{display:block;margin-top:4px;}",
-        ".summary-section-title{font-weight:600;color:#24292f;margin-top:8px;}",
-        ".summary-subsection-title{font-weight:600;color:#57606a;margin-top:6px;}",
-        ".summary-paragraph{margin:6px 0 0 0;line-height:1.6;}",
-        ".summary-list{margin:6px 0 0 18px;padding:0;}",
-        ".summary-list li{margin-top:4px;line-height:1.6;}",
-        ".points,.risks{margin:6px 0 0 18px;}",
-        "details{margin-top:10px;}",
-        "summary{cursor:pointer;color:#444;}",
-        "</style>",
-        "</head>",
-        "<body>",
-        "<h1>公众号 AI 解读汇总</h1>",
-        f'<div class="subtitle">生成时间：{html_escape(generated_at)} ｜ 账号：{total_accounts} ｜ 解读：{total_analyses}</div>',
+    active_account_pages = [
+        account_page_paths.get(account, _account_page_relative_path(account))
+        for account, _latest_key, _sorted_items in account_entries
     ]
+    _cleanup_stale_account_pages(analysis_dir, active_account_pages)
+
+    html_parts = _render_page_start("公众号 AI 解读汇总")
+    html_parts.extend(
+        [
+            "<h1>公众号 AI 解读汇总</h1>",
+            f'<div class="subtitle">生成时间：{html_escape(generated_at)} ｜ 账号：{total_accounts} ｜ 解读：{total_analyses}</div>',
+        ]
+    )
 
     if account_entries:
         html_parts.append('<div class="directory">')
@@ -1082,79 +1263,21 @@ def build_analysis_index_html(config):
                     label = f'{label}｜最新：{entry["latest_time"]}'
                 label = f'{label}｜标题：{entry["latest_title"]}'
                 html_parts.append(
-                    f'<a class="directory-link" href="#{entry["anchor_id"]}">{html_escape(label)}</a>'
+                    f'<a class="directory-link" href="{html_escape(entry["page_href"])}">{html_escape(label)}</a>'
                 )
             html_parts.append("</div>")
             html_parts.append("</div>")
         html_parts.append("</div>")
 
     for account, _latest_key, sorted_items in account_entries:
-        latest_time = _format_latest_time(sorted_items[0]) if sorted_items else ""
-        count = len(sorted_items)
-        meta = f"{count}篇"
-        if latest_time:
-            meta = f"{meta}｜最新：{latest_time}"
-        html_parts.append(
-            f"<h2 id=\"{_account_anchor_id(account)}\">{html_escape(account)}<span class=\"account-meta\">{html_escape(meta)}</span></h2>"
+        _render_account_page_html(
+            config,
+            analysis_dir,
+            account,
+            sorted_items,
+            generated_at,
+            account_page_paths.get(account),
         )
-        if not sorted_items:
-            continue
-        html_parts.append(_render_analysis_item_html(sorted_items[0]))
-        history = sorted_items[1:]
-        if history:
-            html_parts.append("<details>")
-            html_parts.append("<summary>历史解读</summary>")
-            for item in history:
-                html_parts.append(_render_analysis_item_html(item))
-            html_parts.append("</details>")
-
-    html_parts.extend(
-        [
-            "<script>",
-            f"const REANALYZE_API_URL = {json.dumps(reanalyze_api_url, ensure_ascii=False)};",
-            "function setReanalyzeStatus(button, text, state) {",
-            '  const status = button.parentElement ? button.parentElement.querySelector(".reanalyze-status") : null;',
-            "  if (!status) return;",
-            "  status.textContent = text || '';",
-            '  status.classList.remove("is-success", "is-error");',
-            "  if (state) {",
-            "    status.classList.add(state);",
-            "  }",
-            "}",
-            'document.querySelectorAll(".reanalyze-button").forEach((button) => {',
-            "  if (button.disabled) return;",
-            '  button.addEventListener("click", async () => {',
-            '    const articleId = button.getAttribute("data-article-id") || "";',
-            '    const url = button.getAttribute("data-url") || "";',
-            "    if (!url) {",
-            '      setReanalyzeStatus(button, "缺少原文链接，无法重解读");',
-            "      return;",
-            "    }",
-            "    button.disabled = true;",
-            '    button.classList.add("is-busy");',
-            '    setReanalyzeStatus(button, "重新解读中...");',
-            "    try {",
-            "      const response = await fetch(REANALYZE_API_URL, {",
-            '        method: "POST",',
-            '        headers: {"Content-Type": "application/json"},',
-            "        body: JSON.stringify({article_id: articleId, url}),",
-            "      });",
-            "      const payload = await response.json();",
-            "      if (!response.ok || payload.status !== 'ok') {",
-            "        throw new Error('reanalyze_failed');",
-            "      }",
-            '      setReanalyzeStatus(button, "重新解读成功，正在刷新...", "is-success");',
-            "      window.setTimeout(() => window.location.reload(), 800);",
-            "    } catch (error) {",
-            '      setReanalyzeStatus(button, "重新解读失败，请稍后重试", "is-error");',
-            "      button.disabled = false;",
-            '      button.classList.remove("is-busy");',
-            "    }",
-            "  });",
-            "});",
-            "</script>",
-        ]
-    )
 
     html_parts.extend(["</body>", "</html>"])
     content = "\n".join(html_parts) + "\n"
