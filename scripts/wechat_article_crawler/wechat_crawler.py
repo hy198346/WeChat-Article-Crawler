@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 try:
     from .article_analysis import (
         analyze_single_article,
+        build_article_id,
         build_analysis_index_html,
         get_analysis_config,
         _normalize_article_id,
@@ -26,6 +27,7 @@ try:
 except ImportError:
     from article_analysis import (
         analyze_single_article,
+        build_article_id,
         build_analysis_index_html,
         get_analysis_config,
         _normalize_article_id,
@@ -849,6 +851,252 @@ def _async_jobs_dir() -> Path:
     return path
 
 
+def _default_async_retry_state():
+    return {
+        "attempt": 1,
+        "retry_mode": "until_success",
+        "first_failed_at": "",
+        "last_failed_at": "",
+        "last_reason": "",
+        "next_retry_at": "",
+        "stop_reason": "",
+        "notified": False,
+    }
+
+
+def _normalize_async_retry_state(retry_state=None):
+    merged = dict(_default_async_retry_state())
+    if isinstance(retry_state, dict):
+        for key, value in retry_state.items():
+            if value is None:
+                continue
+            merged[key] = value
+    try:
+        merged["attempt"] = max(1, int(merged.get("attempt") or 1))
+    except Exception:
+        merged["attempt"] = 1
+    return merged
+
+
+def _async_retry_time_text(ts=None):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts or time.time()))
+
+
+def _parse_async_retry_time_text(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return time.mktime(time.strptime(text, fmt))
+        except Exception:
+            continue
+    return None
+
+
+def _seconds_until_async_retry(next_retry_at, now_ts=None) -> float:
+    target_ts = _parse_async_retry_time_text(next_retry_at)
+    if target_ts is None:
+        return 0.0
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    return max(0.0, float(target_ts) - current_ts)
+
+
+def _wait_until_async_retry_due(job):
+    retry_state = _normalize_async_retry_state((job or {}).get("retry_state"))
+    delay_seconds = _seconds_until_async_retry(retry_state.get("next_retry_at"))
+    if delay_seconds <= 0:
+        return 0.0
+    print(
+        f"[{_ts_now()}] async single article analysis waiting "
+        f"delay_seconds={delay_seconds:.3f} next_retry_at={retry_state.get('next_retry_at') or ''}"
+    )
+    time.sleep(delay_seconds)
+    return delay_seconds
+
+
+def _classify_async_analysis_failure(reason: str) -> str:
+    text = str(reason or "").strip().lower()
+    if not text:
+        return "recoverable"
+    external_markers = (
+        "wechat_auth_required",
+        "wechat_security_verification_required",
+        "invalid_url",
+        "login_required",
+        "need_login",
+        "security_verification_required",
+        "not_found",
+        "deleted",
+        "removed",
+        "missing_cookie",
+        "missing_token",
+        "missing_config",
+        "forbidden",
+        "access_denied",
+    )
+    if any(marker in text for marker in external_markers):
+        return "external"
+    if text.startswith("invalid_"):
+        return "external"
+    return "recoverable"
+
+
+def _next_async_retry_delay_seconds(attempt: int) -> int:
+    try:
+        current_attempt = int(attempt or 1)
+    except Exception:
+        current_attempt = 1
+    if current_attempt <= 1:
+        return 10
+    if current_attempt == 2:
+        return 60
+    if current_attempt == 3:
+        return 300
+    return 1800
+
+
+def _is_successful_async_analysis(analysis) -> bool:
+    if not isinstance(analysis, dict):
+        return False
+    return str(analysis.get("status") or "").strip() == "ok"
+
+
+def _rewrite_async_job_file(job_path: Path, job):
+    job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+    return job_path
+
+
+def _extract_single_article_async_job_article_id(job) -> str:
+    if not isinstance(job, dict):
+        return ""
+    if str(job.get("job_type") or "").strip() != "single_article_analysis":
+        return ""
+    payload = job.get("payload") or {}
+    fetched = payload.get("fetched") or {}
+    if not isinstance(fetched, dict):
+        return ""
+    explicit_article_id = _normalize_article_id(fetched.get("article_id"))
+    if explicit_article_id:
+        return explicit_article_id
+    try:
+        return build_article_id(fetched)
+    except Exception:
+        return ""
+
+
+def _find_active_single_article_async_job_by_article_id(article_id: str):
+    normalized = _normalize_article_id(article_id)
+    if not normalized:
+        return None
+    for job_path in _async_jobs_dir().glob("*.json"):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if _extract_single_article_async_job_article_id(job) == normalized:
+            return job_path
+    return None
+
+
+def _notify_async_analysis_stop(config, fetched, reason: str):
+    explicit_sendkey = ""
+    if isinstance(config, dict):
+        explicit_sendkey = str(config.get("serverchan_sendkey") or "").strip()
+    sendkey = _get_serverchan_sendkey(config, override_sendkey=explicit_sendkey or None)
+    if not sendkey:
+        return {"ok": False, "skipped": True, "reason": "no_sendkey"}
+    fetched = dict(fetched or {})
+    title = f"异步解读停止：{fetched.get('title') or '(无标题)'}"
+    desp = "\n".join(
+        [
+            f"公众号：{fetched.get('account') or ''}",
+            f"标题：{fetched.get('title') or ''}",
+            f"链接：{fetched.get('url') or ''}",
+            f"原因：{reason or 'unknown_failure'}",
+            "请刷新微信鉴权或检查外部条件后再补跑。",
+        ]
+    ).strip()
+    dedupe_key = f"async_analysis_stop:{fetched.get('url') or fetched.get('title') or reason or 'unknown'}"
+    return send_serverchan_message_once(
+        sendkey,
+        title,
+        desp,
+        dedupe_key=dedupe_key,
+        ttl_seconds=6 * 3600,
+        state_dir=str(OUTPUT_ROOT / "async_job_notify_state"),
+    )
+
+
+def _handle_async_single_article_result(job, analysis, job_path: Path):
+    payload = job.get("payload") or {}
+    config = payload.get("config") or {}
+    fetched = payload.get("fetched") or {}
+    retry_state = _normalize_async_retry_state(job.get("retry_state"))
+    if _is_successful_async_analysis(analysis):
+        print(
+            f"[{_ts_now()}] async single article analysis succeeded "
+            f"title={fetched.get('title') or ''} attempt={retry_state.get('attempt')}"
+        )
+        return {"action": "done"}
+
+    reason = ""
+    if isinstance(analysis, dict):
+        reason = str(analysis.get("reason") or "").strip()
+        if not reason and str(analysis.get("status") or "").strip() == "ok":
+            reason = "empty_analysis"
+        if not reason:
+            reason = str(analysis.get("status") or "").strip()
+    reason = reason or "reanalyze_failed"
+    failure_type = _classify_async_analysis_failure(reason)
+    now_text = _async_retry_time_text()
+
+    if failure_type == "external":
+        retry_state["first_failed_at"] = retry_state.get("first_failed_at") or now_text
+        retry_state["last_failed_at"] = now_text
+        retry_state["last_reason"] = reason
+        retry_state["next_retry_at"] = ""
+        retry_state["stop_reason"] = reason
+        notify_result = _notify_async_analysis_stop(config, fetched, reason)
+        retry_state["notified"] = bool(notify_result.get("ok"))
+        print(
+            f"[{_ts_now()}] async single article analysis stopped "
+            f"title={fetched.get('title') or ''} reason={reason}"
+        )
+        return {"action": "stop", "retry_state": retry_state, "notify_result": notify_result}
+
+    current_attempt = retry_state.get("attempt") or 1
+    delay_seconds = _next_async_retry_delay_seconds(current_attempt)
+    retry_state["attempt"] = int(current_attempt) + 1
+    retry_state["retry_mode"] = str(retry_state.get("retry_mode") or "until_success").strip() or "until_success"
+    retry_state["first_failed_at"] = retry_state.get("first_failed_at") or now_text
+    retry_state["last_failed_at"] = now_text
+    retry_state["last_reason"] = reason
+    retry_state["next_retry_at"] = _async_retry_time_text(time.time() + delay_seconds)
+    retry_state["stop_reason"] = ""
+    retry_state["notified"] = False
+    job["retry_state"] = retry_state
+    _rewrite_async_job_file(job_path, job)
+    try:
+        _spawn_async_job_process(job_path)
+    except Exception as exc:
+        print(
+            f"[{_ts_now()}] WARN async single article analysis respawn failed: "
+            f"{type(exc).__name__}:{exc}"
+        )
+        return {
+            "action": "requeued",
+            "retry_state": retry_state,
+            "delay_seconds": delay_seconds,
+            "spawn_error": f"{type(exc).__name__}:{exc}",
+        }
+    print(
+        f"[{_ts_now()}] async single article analysis requeued "
+        f"title={fetched.get('title') or ''} reason={reason} attempt={retry_state.get('attempt')}"
+    )
+    return {"action": "requeued", "retry_state": retry_state, "delay_seconds": delay_seconds}
+
+
 def _serialize_async_job(name, func, args, kwargs):
     kwargs = dict(kwargs or {})
     if func is _attach_single_article_analysis:
@@ -865,6 +1113,7 @@ def _serialize_async_job(name, func, args, kwargs):
                 "refresh_index": refresh_index,
                 "force_reanalyze": force_reanalyze,
             },
+            "retry_state": _default_async_retry_state(),
         }
     if func is _run_batch_analysis_pipeline:
         config = args[0] if len(args) > 0 else kwargs.get("config")
@@ -905,17 +1154,22 @@ def _spawn_async_job_process(job_path):
 
 def _run_async_job_file(job_file):
     job_path = Path(job_file)
+    remove_job_file = True
     try:
         job = json.loads(job_path.read_text(encoding="utf-8"))
         job_type = str(job.get("job_type") or "").strip()
         payload = job.get("payload") or {}
         if job_type == "single_article_analysis":
-            _attach_single_article_analysis(
+            _wait_until_async_retry_due(job)
+            analysis = _attach_single_article_analysis(
                 payload.get("config"),
                 payload.get("fetched"),
                 refresh_index=bool(payload.get("refresh_index", True)),
                 force_reanalyze=bool(payload.get("force_reanalyze", False)),
             )
+            outcome = _handle_async_single_article_result(job, analysis, job_path)
+            if outcome.get("action") == "requeued":
+                remove_job_file = False
             return
         if job_type == "batch_analysis_pipeline":
             _run_batch_analysis_pipeline(
@@ -927,15 +1181,27 @@ def _run_async_job_file(job_file):
             return
         raise ValueError(f"unsupported_async_job_type:{job_type}")
     finally:
-        try:
-            job_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        if remove_job_file:
+            try:
+                job_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def _schedule_async_job(name, func, *args, **kwargs):
     if _ASYNC_JOB_DISPATCH_MODE == "process":
         job = _serialize_async_job(name, func, args, kwargs)
+        article_id = _extract_single_article_async_job_article_id(job)
+        if article_id:
+            existing_job_path = _find_active_single_article_async_job_by_article_id(article_id)
+            if existing_job_path is not None:
+                return {
+                    "status": "deduped",
+                    "name": name,
+                    "mode": "process",
+                    "article_id": article_id,
+                    "job_file": str(existing_job_path),
+                }
         job_path = _write_async_job_file(job)
         process = _spawn_async_job_process(job_path)
         return {"status": "scheduled", "name": name, "mode": "process", "pid": getattr(process, "pid", None)}

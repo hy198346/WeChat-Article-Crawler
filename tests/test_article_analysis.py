@@ -634,6 +634,56 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_analyze_single_article_ignores_empty_ok_cache_and_reanalyzes(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = (
+            lambda config, prompt: '{"summary":"重新生成的有效总结"}'
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                article = {
+                    "account": "测试号",
+                    "title": "空缓存文章",
+                    "published_at": "2026-06-13 10:15",
+                    "url": "https://mp.weixin.qq.com/s/empty-ok-cache",
+                    "markdown": "body",
+                }
+                config = {
+                    "analysis_enabled": True,
+                    "analysis_output_dir": d,
+                    "analysis_skip_if_exists": True,
+                    "analysis_news_interpret_url": "",
+                }
+                article_id = article_analysis.build_article_id(article)
+                cache_dir = Path(d) / "article_analysis"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                (cache_dir / f"{article_id}.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "article_id": article_id,
+                            "account": "测试号",
+                            "title": "空缓存文章",
+                            "url": "https://mp.weixin.qq.com/s/empty-ok-cache",
+                            "published_at": "2026-06-13 10:15",
+                            "topic": "",
+                            "core_points": [],
+                            "audience": "",
+                            "risks": [],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                result = article_analysis.analyze_single_article(config, article)
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["summary"], "重新生成的有效总结")
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_ignores_bad_cache_and_reanalyzes(self):
         calls = []
 
@@ -924,6 +974,33 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertEqual(result["summary"], "第一段总结\n第二段总结")
                 self.assertEqual(result["source"], "local")
                 self.assertEqual(result["topic"], "")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_local_llm_rejects_empty_analysis_payload(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: "{}"
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "空分析标题",
+                        "published_at": "2026-06-13 12:15",
+                        "url": "https://mp.weixin.qq.com/s/empty-analysis",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "empty_analysis")
+                self.assertEqual(result["title"], "空分析标题")
+                self.assertEqual(result["url"], "https://mp.weixin.qq.com/s/empty-analysis")
         finally:
             article_analysis.call_ollama_chat = old_local
 
@@ -1529,6 +1606,26 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
         self.assertIn('<p class="summary-paragraph">第二段总结</p>', html)
         self.assertNotIn("主题：", html)
         self.assertNotIn("核心观点：", html)
+
+    def test_render_analysis_item_html_treats_empty_ok_payload_as_retryable(self):
+        html = article_analysis._render_analysis_item_html(
+            {
+                "article_id": "aid-empty",
+                "title": "空白解读文章",
+                "url": "https://mp.weixin.qq.com/s/empty-render",
+                "published_at": "2026-06-13 10:15",
+                "status": "ok",
+                "reason": "empty_analysis",
+                "topic": "",
+                "core_points": [],
+                "audience": "",
+                "risks": [],
+            }
+        )
+
+        self.assertIn("解读失败，可重试", html)
+        self.assertIn("<li>empty_analysis</li>", html)
+        self.assertNotIn('class="summary-block"', html)
 
     def test_render_summary_html_renders_sections_lists_and_escapes_html(self):
         html = article_analysis._render_summary_html(
@@ -3400,6 +3497,7 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
         calls = []
 
         old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
+        old_output_root = wechat_crawler.OUTPUT_ROOT
         old_popen = getattr(wechat_crawler.subprocess, "Popen", None)
         try:
             wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
@@ -3410,18 +3508,20 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
 
             wechat_crawler.subprocess.Popen = lambda *args, **kwargs: calls.append((args, kwargs)) or DummyProcess()
 
-            result = wechat_crawler._schedule_async_job(
-                "extract_latest_analysis",
-                wechat_crawler._attach_single_article_analysis,
-                {"analysis_enabled": False},
-                {
-                    "account": "测试号",
-                    "title": "标题",
-                    "date": "2026-06-13",
-                    "published_at": "2026-06-13 09:30",
-                    "url": "https://mp.weixin.qq.com/s/test",
-                },
-            )
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                result = wechat_crawler._schedule_async_job(
+                    "extract_latest_analysis",
+                    wechat_crawler._attach_single_article_analysis,
+                    {"analysis_enabled": False},
+                    {
+                        "account": "测试号",
+                        "title": "标题",
+                        "date": "2026-06-13",
+                        "published_at": "2026-06-13 09:30",
+                        "url": "https://mp.weixin.qq.com/s/test",
+                    },
+                )
 
             self.assertEqual(result["status"], "scheduled")
             self.assertEqual(result["mode"], "process")
@@ -3430,10 +3530,119 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             self.assertIn("--run-async-job-file", cmd)
             self.assertTrue(calls[0][1]["start_new_session"])
         finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
             if old_mode is not None:
                 wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
             if old_popen is not None:
                 wechat_crawler.subprocess.Popen = old_popen
+
+    def test_schedule_async_job_dedupes_same_single_article_by_effective_article_id(self):
+        spawned = []
+
+        old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        try:
+            class DummyProcess:
+                pid = 56789
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
+            wechat_crawler._spawn_async_job_process = fake_spawn
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+
+                first = wechat_crawler._schedule_async_job(
+                    "extract_latest_analysis",
+                    wechat_crawler._attach_single_article_analysis,
+                    {"analysis_enabled": True},
+                    {
+                        "account": "测试号A",
+                        "title": "同一篇文章",
+                        "published_at": "2026-06-13 10:00",
+                        "url": "https://mp.weixin.qq.com/s/same-article",
+                    },
+                )
+                second = wechat_crawler._schedule_async_job(
+                    "extract_latest_analysis",
+                    wechat_crawler._attach_single_article_analysis,
+                    {"analysis_enabled": True},
+                    {
+                        "account": "测试号B",
+                        "title": "同一篇文章",
+                        "published_at": "2026-06-13 10:00",
+                        "url": "https://mp.weixin.qq.com/s/same-article",
+                    },
+                )
+
+                self.assertEqual(first["status"], "scheduled")
+                self.assertEqual(second["status"], "deduped")
+                self.assertEqual(len(spawned), 1)
+                self.assertEqual(len(list((wechat_crawler.OUTPUT_ROOT / "async_jobs").glob("*.json"))), 1)
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            if old_mode is not None:
+                wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
+
+    def test_schedule_async_job_allows_distinct_single_article_jobs(self):
+        spawned = []
+
+        old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        try:
+            class DummyProcess:
+                pid = 56790
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
+            wechat_crawler._spawn_async_job_process = fake_spawn
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+
+                first = wechat_crawler._schedule_async_job(
+                    "extract_latest_analysis",
+                    wechat_crawler._attach_single_article_analysis,
+                    {"analysis_enabled": True},
+                    {
+                        "account": "测试号",
+                        "title": "文章A",
+                        "published_at": "2026-06-13 10:00",
+                        "url": "https://mp.weixin.qq.com/s/article-a",
+                    },
+                )
+                second = wechat_crawler._schedule_async_job(
+                    "extract_latest_analysis",
+                    wechat_crawler._attach_single_article_analysis,
+                    {"analysis_enabled": True},
+                    {
+                        "account": "测试号",
+                        "title": "文章B",
+                        "published_at": "2026-06-13 10:01",
+                        "url": "https://mp.weixin.qq.com/s/article-b",
+                    },
+                )
+
+                self.assertEqual(first["status"], "scheduled")
+                self.assertEqual(second["status"], "scheduled")
+                self.assertEqual(len(spawned), 2)
+                self.assertEqual(len(list((wechat_crawler.OUTPUT_ROOT / "async_jobs").glob("*.json"))), 2)
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            if old_mode is not None:
+                wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
 
     def test_run_async_job_file_executes_single_article_analysis_job(self):
         captured = []
@@ -3472,6 +3681,470 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 self.assertFalse(job_path.exists())
         finally:
             wechat_crawler._attach_single_article_analysis = old_attach
+
+    def test_run_async_job_file_rewrites_same_job_for_recoverable_failure_attempt_1_to_2(self):
+        spawned = []
+
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_attach = wechat_crawler._attach_single_article_analysis
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        try:
+            class DummyProcess:
+                pid = 23456
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                return {
+                    "status": "skipped",
+                    "reason": "ollama_timeout",
+                    "article_id": "aid-retry-1",
+                    "title": fetched["title"],
+                    "url": fetched["url"],
+                }
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler._spawn_async_job_process = fake_spawn
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                job_path = Path(d) / "job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "extract_latest_analysis",
+                            "job_type": "single_article_analysis",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "fetched": {
+                                    "account": "测试号",
+                                    "title": "可恢复失败文章",
+                                    "url": "https://mp.weixin.qq.com/s/retry-once",
+                                },
+                                "refresh_index": False,
+                                "force_reanalyze": False,
+                            },
+                            "retry_state": {
+                                "attempt": 1,
+                                "retry_mode": "until_success",
+                                "first_failed_at": "2026-06-13T09:00:00",
+                                "last_failed_at": "2026-06-13T09:00:00",
+                                "last_reason": "news_interpret_timeout",
+                                "next_retry_at": "2026-06-13T09:00:10",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertTrue(job_path.exists())
+                self.assertEqual(spawned, [job_path])
+                retry_job = json.loads(job_path.read_text(encoding="utf-8"))
+                retry_state = retry_job.get("retry_state") or {}
+                self.assertEqual(retry_state.get("attempt"), 2)
+                self.assertEqual(retry_state.get("retry_mode"), "until_success")
+                self.assertEqual(retry_state.get("first_failed_at"), "2026-06-13T09:00:00")
+                self.assertEqual(retry_state.get("last_reason"), "ollama_timeout")
+                self.assertTrue(retry_state.get("last_failed_at"))
+                self.assertTrue(retry_state.get("next_retry_at"))
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            wechat_crawler._attach_single_article_analysis = old_attach
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
+
+    def test_run_async_job_file_rewrites_same_job_for_high_attempt_recoverable_failure(self):
+        spawned = []
+
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_attach = wechat_crawler._attach_single_article_analysis
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        old_notify_once = getattr(wechat_crawler, "send_serverchan_message_once", None)
+        try:
+            class DummyProcess:
+                pid = 23457
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                return {
+                    "status": "skipped",
+                    "reason": "news_interpret_timeout",
+                    "article_id": "aid-retry-high-attempt",
+                    "title": fetched["title"],
+                    "url": fetched["url"],
+                }
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler._spawn_async_job_process = fake_spawn
+            wechat_crawler.send_serverchan_message_once = (
+                lambda *args, **kwargs: self.fail("高 attempt 的 recoverable 失败不应停止并发送失败通知")
+            )
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                job_path = Path(d) / "job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "extract_latest_analysis",
+                            "job_type": "single_article_analysis",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "fetched": {
+                                    "account": "测试号",
+                                    "title": "高重试次数文章",
+                                    "url": "https://mp.weixin.qq.com/s/retry-high-attempt",
+                                },
+                                "refresh_index": False,
+                                "force_reanalyze": False,
+                            },
+                            "retry_state": {
+                                "attempt": 7,
+                                "retry_mode": "until_success",
+                                "first_failed_at": "2026-06-13T09:00:00",
+                                "last_failed_at": "2026-06-13T09:30:00",
+                                "last_reason": "ollama_timeout",
+                                "next_retry_at": "2026-06-13T10:00:00",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertTrue(job_path.exists())
+                self.assertEqual(spawned, [job_path])
+                retry_job = json.loads(job_path.read_text(encoding="utf-8"))
+                retry_state = retry_job.get("retry_state") or {}
+                self.assertEqual(retry_state.get("attempt"), 8)
+                self.assertEqual(retry_state.get("retry_mode"), "until_success")
+                self.assertEqual(retry_state.get("first_failed_at"), "2026-06-13T09:00:00")
+                self.assertEqual(retry_state.get("last_reason"), "news_interpret_timeout")
+                self.assertTrue(retry_state.get("last_failed_at"))
+                self.assertTrue(retry_state.get("next_retry_at"))
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            wechat_crawler._attach_single_article_analysis = old_attach
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
+            if old_notify_once is not None:
+                wechat_crawler.send_serverchan_message_once = old_notify_once
+
+    def test_run_async_job_file_fail_once_then_ok_rewrites_then_cleans_same_job(self):
+        spawned = []
+        attach_results = [
+            {
+                "status": "skipped",
+                "reason": "ollama_timeout",
+                "article_id": "aid-retry-then-ok",
+                "title": "失败一次后成功",
+                "url": "https://mp.weixin.qq.com/s/fail-once-then-ok",
+            },
+            {
+                "status": "ok",
+                "article_id": "aid-retry-then-ok",
+                "summary": "最终成功",
+                "title": "失败一次后成功",
+                "url": "https://mp.weixin.qq.com/s/fail-once-then-ok",
+            },
+        ]
+
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_attach = wechat_crawler._attach_single_article_analysis
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        old_notify_once = getattr(wechat_crawler, "send_serverchan_message_once", None)
+        try:
+            class DummyProcess:
+                pid = 34567
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                return attach_results.pop(0)
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler._spawn_async_job_process = fake_spawn
+            wechat_crawler.send_serverchan_message_once = (
+                lambda *args, **kwargs: self.fail("recoverable->ok 不应发送失败通知")
+            )
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                job_path = Path(d) / "job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "extract_latest_analysis",
+                            "job_type": "single_article_analysis",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "fetched": {
+                                    "account": "测试号",
+                                    "title": "失败一次后成功",
+                                    "url": "https://mp.weixin.qq.com/s/fail-once-then-ok",
+                                },
+                                "refresh_index": False,
+                                "force_reanalyze": False,
+                            },
+                            "retry_state": {
+                                "attempt": 1,
+                                "retry_mode": "until_success",
+                                "first_failed_at": "2026-06-13T09:00:00",
+                                "last_failed_at": "2026-06-13T09:00:00",
+                                "last_reason": "news_interpret_timeout",
+                                "next_retry_at": "2026-06-13T09:00:10",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+                self.assertTrue(job_path.exists())
+                self.assertEqual(spawned, [job_path])
+
+                spawned.clear()
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertFalse(job_path.exists())
+                self.assertEqual(spawned, [])
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            wechat_crawler._attach_single_article_analysis = old_attach
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
+            if old_notify_once is not None:
+                wechat_crawler.send_serverchan_message_once = old_notify_once
+
+    def test_run_async_job_file_external_failure_notifies_with_minimum_contract_and_stops(self):
+        notifications = []
+        spawned = []
+
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_attach = wechat_crawler._attach_single_article_analysis
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        old_notify_once = getattr(wechat_crawler, "send_serverchan_message_once", None)
+        try:
+            class DummyProcess:
+                pid = 45678
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                return {
+                    "status": "skipped",
+                    "reason": "wechat_auth_required",
+                    "article_id": "aid-external-stop",
+                    "title": fetched["title"],
+                    "url": fetched["url"],
+                    "account": fetched["account"],
+                }
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            def fake_notify_once(sendkey, title, desp, timeout=20, dedupe_key=None, ttl_seconds=0, state_dir=None):
+                notifications.append(
+                    {
+                        "sendkey": sendkey,
+                        "title": title,
+                        "desp": desp,
+                    }
+                )
+                return {"ok": True}
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler._spawn_async_job_process = fake_spawn
+            wechat_crawler.send_serverchan_message_once = fake_notify_once
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                job_path = Path(d) / "job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "extract_latest_analysis",
+                            "job_type": "single_article_analysis",
+                            "payload": {
+                                "config": {
+                                    "analysis_enabled": True,
+                                    "serverchan_sendkey": "sct-test",
+                                },
+                                "fetched": {
+                                    "account": "测试号",
+                                    "title": "外部失败文章",
+                                    "url": "https://mp.weixin.qq.com/s/external-stop",
+                                },
+                                "refresh_index": False,
+                                "force_reanalyze": False,
+                            },
+                            "retry_state": {
+                                "attempt": 1,
+                                "retry_mode": "stop_on_external",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertFalse(job_path.exists())
+                self.assertEqual(spawned, [])
+                self.assertEqual(len(notifications), 1)
+                self.assertEqual(notifications[0]["sendkey"], "sct-test")
+                self.assertIn("测试号", notifications[0]["desp"])
+                self.assertIn("外部失败文章", notifications[0]["desp"])
+                self.assertIn("https://mp.weixin.qq.com/s/external-stop", notifications[0]["desp"])
+                self.assertIn("wechat_auth_required", notifications[0]["desp"])
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            wechat_crawler._attach_single_article_analysis = old_attach
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
+            if old_notify_once is not None:
+                wechat_crawler.send_serverchan_message_once = old_notify_once
+
+    def test_run_async_job_file_waits_until_next_retry_at_before_running(self):
+        captured = []
+        sleep_calls = []
+        fake_now = {"value": 1_800_000_000.0}
+
+        old_attach = wechat_crawler._attach_single_article_analysis
+        old_time = wechat_crawler.time.time
+        old_sleep = wechat_crawler.time.sleep
+        try:
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                captured.append((config, fetched, refresh_index, force_reanalyze, fake_now["value"]))
+                return {"status": "ok", "article_id": "aid-wait-retry"}
+
+            def fake_sleep(seconds):
+                sleep_calls.append(seconds)
+                fake_now["value"] += seconds
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler.time.time = lambda: fake_now["value"]
+            wechat_crawler.time.sleep = fake_sleep
+
+            with tempfile.TemporaryDirectory() as d:
+                job_path = Path(d) / "job.json"
+                next_retry_at = wechat_crawler._async_retry_time_text(fake_now["value"] + 10)
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "extract_latest_analysis",
+                            "job_type": "single_article_analysis",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "fetched": {
+                                    "account": "测试号",
+                                    "title": "等待重试文章",
+                                    "url": "https://mp.weixin.qq.com/s/wait-retry",
+                                },
+                                "refresh_index": False,
+                                "force_reanalyze": False,
+                            },
+                            "retry_state": {
+                                "attempt": 2,
+                                "retry_mode": "until_success",
+                                "last_reason": "ollama_timeout",
+                                "next_retry_at": next_retry_at,
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertEqual(len(captured), 1)
+                self.assertEqual(len(sleep_calls), 1)
+                self.assertAlmostEqual(sleep_calls[0], 10, delta=0.5)
+                self.assertFalse(job_path.exists())
+        finally:
+            wechat_crawler._attach_single_article_analysis = old_attach
+            wechat_crawler.time.time = old_time
+            wechat_crawler.time.sleep = old_sleep
+
+    def test_run_async_job_file_keeps_recoverable_job_when_respawn_fails(self):
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_attach = wechat_crawler._attach_single_article_analysis
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        try:
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                return {
+                    "status": "skipped",
+                    "reason": "ollama_timeout",
+                    "article_id": "aid-spawn-fail-keep",
+                    "title": fetched["title"],
+                    "url": fetched["url"],
+                }
+
+            def fail_spawn(job_path):
+                raise OSError("spawn boom")
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler._spawn_async_job_process = fail_spawn
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                job_path = Path(d) / "job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "extract_latest_analysis",
+                            "job_type": "single_article_analysis",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "fetched": {
+                                    "account": "测试号",
+                                    "title": "重排拉起失败文章",
+                                    "url": "https://mp.weixin.qq.com/s/spawn-fail-keep",
+                                },
+                                "refresh_index": False,
+                                "force_reanalyze": False,
+                            },
+                            "retry_state": {
+                                "attempt": 1,
+                                "retry_mode": "until_success",
+                                "first_failed_at": "2026-06-13T09:00:00",
+                                "last_failed_at": "2026-06-13T09:00:00",
+                                "last_reason": "news_interpret_timeout",
+                                "next_retry_at": "2026-06-13T09:00:10",
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertTrue(job_path.exists())
+                retry_job = json.loads(job_path.read_text(encoding="utf-8"))
+                retry_state = retry_job.get("retry_state") or {}
+                self.assertEqual(retry_state.get("attempt"), 2)
+                self.assertEqual(retry_state.get("last_reason"), "ollama_timeout")
+                self.assertTrue(retry_state.get("next_retry_at"))
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            wechat_crawler._attach_single_article_analysis = old_attach
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
 
     def test_run_extract_from_url_uses_authenticated_headers_from_config(self):
         captured_headers = []

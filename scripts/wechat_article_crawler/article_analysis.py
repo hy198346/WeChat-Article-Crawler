@@ -182,8 +182,6 @@ def _is_valid_cached_single_analysis(data):
     if not isinstance(data.get("article_id"), str) or not data.get("article_id").strip():
         return False
     summary = _normalize_summary_text(data.get("summary"))
-    if summary:
-        return True
     if "topic" not in data or not isinstance(data.get("topic"), str):
         return False
     if "audience" not in data or not isinstance(data.get("audience"), str):
@@ -196,7 +194,13 @@ def _is_valid_cached_single_analysis(data):
             return False
         if any(not isinstance(item, str) for item in value):
             return False
-    return True
+    return _has_meaningful_single_analysis_content(
+        summary=summary,
+        topic=data.get("topic"),
+        core_points=data.get("core_points"),
+        audience=data.get("audience"),
+        risks=data.get("risks"),
+    )
 
 
 def _normalize_list(value):
@@ -258,6 +262,20 @@ def _normalize_summary_text(value):
             if key in value:
                 return _normalize_summary_text(value.get(key))
     return str(value).strip()
+
+
+def _has_meaningful_single_analysis_content(
+    *, summary="", topic="", core_points=None, audience="", risks=None
+):
+    return any(
+        (
+            _normalize_summary_text(summary),
+            _normalize_scalar_string(topic),
+            bool(_normalize_list(core_points)),
+            _normalize_scalar_string(audience),
+            bool(_normalize_list(risks)),
+        )
+    )
 
 
 def _render_summary_html(summary: str) -> str:
@@ -472,12 +490,24 @@ def _parse_single_analysis(content: str):
             "audience": "",
             "risks": [],
         }
+    topic = _normalize_scalar_string(data.get("topic"))
+    core_points = _normalize_list(data.get("core_points"))
+    audience = _normalize_scalar_string(data.get("audience"))
+    risks = _normalize_list(data.get("risks"))
+    if not _has_meaningful_single_analysis_content(
+        summary=summary,
+        topic=topic,
+        core_points=core_points,
+        audience=audience,
+        risks=risks,
+    ):
+        return {"status": "skipped", "reason": "empty_analysis"}
     return {
         "status": "ok",
-        "topic": _normalize_scalar_string(data.get("topic")),
-        "core_points": _normalize_list(data.get("core_points")),
-        "audience": _normalize_scalar_string(data.get("audience")),
-        "risks": _normalize_list(data.get("risks")),
+        "topic": topic,
+        "core_points": core_points,
+        "audience": audience,
+        "risks": risks,
     }
 
 
@@ -730,6 +760,15 @@ def _render_analysis_item_html(item: dict) -> str:
     audience = _normalize_scalar_string(item.get("audience"))
     core_points = _normalize_list(item.get("core_points"))
     risks = _normalize_list(item.get("risks"))
+    if status == "ok" and not _has_meaningful_single_analysis_content(
+        summary=summary,
+        topic=topic,
+        core_points=core_points,
+        audience=audience,
+        risks=risks,
+    ):
+        status = "skipped"
+        reason = reason or "empty_analysis"
     if status != "ok" and not topic:
         topic = "解读失败，可重试"
     if status != "ok" and reason and not risks:
