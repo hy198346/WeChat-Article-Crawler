@@ -103,15 +103,16 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --push-latest-all --acc
 python3 scripts/wechat_article_crawler/wechat_crawler.py --push-latest-all --force
 ```
 
-## AI 文章解读（Ollama）
+## AI 文章解读（元宝优先，本地兜底）
 
-抓取完成后可以自动调用本地或局域网 Ollama 生成文章解读。
+抓取完成后，系统会优先复用 `news` 站现有元宝接口生成公众号文章总结；如果元宝接口失败、超时或返回空结果，再自动回退到本地或局域网 Ollama 兜底。
 
-- 单篇模式会生成：主题、核心观点、适合谁看、风险/注意点
-- 批量模式会生成：本轮重点、共性观点、优先阅读
-- 汇总推送时可通过 `analysis_push_batch` 控制是否在 Server 酱正文追加“本轮解读”
+- 单篇模式优先生成 `summary`，页面展示也会优先显示“总结”
+- 批量模式会保留本轮汇总摘要与优先阅读信息
+- `Server酱` 只发送公众号、时间、标题和统一解读页链接，不再在通知正文里追加 AI 解读内容
+- 单篇和批量抓取在 `push=true` 时都会先发通知，再由后台异步生成解读
 
-开始前请先完成 Ollama 前置准备：
+本地兜底依赖 Ollama，开始前请先完成 Ollama 前置准备：
 
 1. 安装 Ollama
    - macOS 可参考 [Ollama 官网](https://ollama.com/download) 安装，或用 `brew install ollama`
@@ -133,7 +134,7 @@ ollama pull qwen3:4b
 curl http://192.168.9.158:11434/api/tags
 ```
 
-默认按以下优先级解析 Ollama 地址：
+默认按以下优先级解析本地兜底模型地址：
 
 - `config.json.analysis_base_url`
 - `.env` / 环境变量 `LOCAL_LLM_BASE_URL`（推荐使用 `http://192.168.9.158:11434/v1`）
@@ -143,7 +144,7 @@ curl http://192.168.9.158:11434/api/tags
 - `.env` / 环境变量 `OLLAMA_MODEL`
 - 默认值 `http://192.168.9.158:11434`
 
-如果你已经在其他项目（如研报站）里使用 `LOCAL_LLM_BASE_URL`，本项目可直接复用，无需重复复制配置。
+如果你已经在其他项目里使用 `LOCAL_LLM_BASE_URL`，本项目可直接复用，无需重复复制配置。
 
 - 本机运行 Ollama：可以显式设置 `analysis_base_url`
 - 局域网其他机器运行 Ollama：推荐在 `.env` 中设置 `LOCAL_LLM_BASE_URL=http://192.168.9.158:11434/v1`
@@ -165,6 +166,27 @@ curl http://192.168.9.158:11434/api/tags
 python3 scripts/wechat_article_crawler/wechat_crawler.py --article-url "https://mp.weixin.qq.com/s/xxxx" --no-push
 ```
 
+如果要给聚合页里的“重新解读”按钮提供服务端接口，单独启动重解读服务：
+
+```bash
+python3 scripts/wechat_article_crawler/wechat_crawler.py --serve-reanalyze
+```
+
+默认监听：
+
+```text
+http://127.0.0.1:8766/api/reanalyze
+```
+
+说明：
+
+- 该服务用于接收聚合页按钮发起的 `POST /api/reanalyze`
+- 仅接受有效的 `mp.weixin.qq.com` 文章链接
+- 会强制绕过 `analysis_skip_if_exists`，对指定文章重新抓取并重解读
+- 若旧缓存或前端请求里已有有效账号名，会优先保留，避免重新抓取时回退成 `Unknown_Account`
+- 若配置 `analysis_reanalyze_path`，前端与后端会同时切换到同一路径
+- 若配置 `analysis_public_base_url`，聚合页会优先使用公网地址生成重解读接口 URL；未配置时使用相对路径 `/api/reanalyze`
+
 启用 AI 后，读取指定公众号最新文章并附带 AI 解读：
 
 ```bash
@@ -182,7 +204,7 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --push-latest-all --acc
 | 配置项 | 说明 |
 |---------|------|
 | analysis_enabled | 是否启用 AI 解读 |
-| analysis_push_batch | 批量推送时是否在正文追加“本轮解读” |
+| analysis_news_interpret_url | `news` 站元宝解读接口；也可通过 `NEWS_INTERPRET_BASE_URL` 自动补全 |
 | analysis_base_url | Ollama 服务地址 |
 | analysis_model | 使用的模型名，支持被环境变量覆盖 |
 | analysis_timeout_seconds | 单次调用超时 |
@@ -190,6 +212,8 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --push-latest-all --acc
 | analysis_save_json | 是否保存 JSON 结果 |
 | analysis_save_markdown | 是否保存 Markdown 结果 |
 | analysis_skip_if_exists | 命中缓存时是否跳过重分析 |
+| analysis_public_base_url | 对外访问基地址，用于生成统一解读页链接和前台重解读地址 |
+| analysis_reanalyze_path | 重解读接口路径，默认 `/api/reanalyze` |
 
 分析结果默认保存到：
 
@@ -197,6 +221,39 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --push-latest-all --acc
 output/article_analysis/
 output/article_batches/
 ```
+
+### 解读聚合 HTML 页面
+
+启用 AI 解读后，会基于 `output/article_analysis/*.json` 自动生成聚合页面：
+
+```text
+output/article_analysis/index.html
+```
+
+页面效果：
+
+- 按公众号分组排列
+- 每个公众号默认展示最新一条解读
+- 历史解读折叠展开
+- 可点击标题跳转原文链接
+- 每条解读卡片带“重新解读”按钮
+
+重新解读按钮说明：
+
+- 页面脚本默认请求相对路径 `/api/reanalyze`
+- 若配置 `analysis_public_base_url`，会优先请求对应公网地址
+- 点击后按钮会进入忙碌态，并显示“重新解读中...”
+- 成功后显示“重新解读成功，正在刷新...”，随后自动刷新聚合页
+- 失败后显示统一提示“重新解读失败，请稍后重试”
+- 若该条目缺少原文链接，按钮会禁用并显示“缺少原文链接，无法重解读”
+
+调试建议：
+
+1. 先生成或刷新 `output/article_analysis/index.html`
+2. 启动静态文件服务，例如 `python3 -m http.server 8765`
+3. 另开一个终端执行 `python3 scripts/wechat_article_crawler/wechat_crawler.py --serve-reanalyze`
+4. 如果页面通过公网域名访问，确认该域名已把 `analysis_reanalyze_path` 代理到本地重解读服务
+5. 打开聚合页并点击“重新解读”验证链路
 
 ## 自动运行（每天 8/12/16/20/24 点）
 

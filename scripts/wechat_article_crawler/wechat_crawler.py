@@ -7,26 +7,30 @@ import argparse
 import asyncio
 import sys
 import hashlib
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     from .article_analysis import (
         analyze_single_article,
+        build_analysis_index_html,
         get_analysis_config,
+        _normalize_article_id,
         persist_batch_analysis_outputs,
         persist_single_analysis_outputs,
-        render_batch_analysis_markdown,
-        render_single_analysis_markdown,
         summarize_analysis_batch,
     )
 except ImportError:
     from article_analysis import (
         analyze_single_article,
+        build_analysis_index_html,
         get_analysis_config,
+        _normalize_article_id,
         persist_batch_analysis_outputs,
         persist_single_analysis_outputs,
-        render_batch_analysis_markdown,
-        render_single_analysis_markdown,
         summarize_analysis_batch,
     )
 
@@ -42,6 +46,35 @@ REPO_ROOT = _repo_root()
 OUTPUT_ROOT = REPO_ROOT / "output"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
+_ASYNC_JOB_DISPATCH_MODE = "thread"
+
+
+def _parse_env_file(path: Path):
+    values = {}
+    try:
+        if not path.exists():
+            return values
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = (raw or "").strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = (key or "").strip()
+            if not key:
+                continue
+            values[key] = (value or "").strip().strip("'").strip('"').strip()
+    except OSError:
+        return {}
+    return values
+
+
+def _load_env_into_process(root: Path):
+    env_file = str(os.environ.get("WECHAT_ENV_FILE") or "").strip()
+    target = Path(env_file) if env_file else (root / ".env")
+    for key, value in _parse_env_file(target).items():
+        os.environ.setdefault(key, value)
+    return target if target.exists() else None
+
 # 配置和数据文件路径
 CONFIG_FILE = str(REPO_ROOT / "config.json")
 FAKEID_FILE = str(REPO_ROOT / "gzh.txt")
@@ -54,6 +87,142 @@ PUSH_STATE_FILE = str(OUTPUT_ROOT / "push_state.json")
 
 def _ts_now():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+def _refresh_analysis_index_html(config):
+    try:
+        build_analysis_index_html(config)
+    except Exception as exc:
+        print(f"[{_ts_now()}] WARN refresh analysis index html failed: {type(exc).__name__}:{exc}")
+        raise
+
+
+def _copy_config_with_forced_reanalyze(config):
+    copied = dict(config or {})
+    copied["analysis_skip_if_exists"] = False
+    return copied
+
+
+def _normalize_effective_account_name(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered == "unknown_account":
+        return ""
+    if lowered.startswith("gh_"):
+        return ""
+    return text
+
+
+def _resolve_reanalyze_api_path(config) -> str:
+    cfg = get_analysis_config(config or {})
+    path = str(cfg.get("analysis_reanalyze_path") or "").strip() or "/api/reanalyze"
+    return path if path.startswith("/") else f"/{path}"
+
+
+def _is_trusted_local_reanalyze_source(headers, config=None) -> bool:
+    if headers is None:
+        return False
+    trusted_hosts = {"127.0.0.1", "localhost", "::1"}
+    public_base_url = str(get_analysis_config(config or {}).get("analysis_public_base_url") or "").strip()
+    if public_base_url:
+        try:
+            parsed_public = urlparse(public_base_url)
+            public_host = (parsed_public.hostname or "").lower()
+            if public_host:
+                trusted_hosts.add(public_host)
+        except Exception:
+            pass
+    for header_name in ("Origin", "Referer"):
+        raw = ""
+        if hasattr(headers, "get"):
+            raw = str(headers.get(header_name) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = urlparse(raw)
+        except Exception:
+            continue
+        if parsed.scheme not in ("http", "https"):
+            continue
+        host = (parsed.hostname or "").lower()
+        if host in trusted_hosts:
+            return True
+    return False
+
+
+def _load_cached_analysis_by_article_id(config, article_id):
+    text = _normalize_article_id(article_id)
+    if not text:
+        return None
+    cache_path = Path(get_analysis_config(config).get("analysis_output_dir") or "output") / "article_analysis" / f"{text}.json"
+    try:
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _resolve_reanalyze_account_name(config, article_id=None, payload_account=None, fallback_account=None):
+    for candidate in (payload_account, fallback_account):
+        normalized = _normalize_effective_account_name(candidate)
+        if normalized:
+            return normalized
+    cached = _load_cached_analysis_by_article_id(config, article_id)
+    if isinstance(cached, dict):
+        normalized = _normalize_effective_account_name(cached.get("account"))
+        if normalized:
+            return normalized
+    return ""
+
+
+def _is_allowed_reanalyze_url(url):
+    text = str(url or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text)
+    if parsed.scheme != "https":
+        return False
+    if (parsed.netloc or "").lower() != "mp.weixin.qq.com":
+        return False
+    path = (parsed.path or "").strip()
+    if not path:
+        return False
+    if not (path == "/s" or path.startswith("/s/")):
+        return False
+    return is_valid_article_link(text)
+
+
+def _detect_wechat_article_access_error(text: str) -> str:
+    body = str(text or "")
+    if not body:
+        return ""
+    if _looks_like_wechat_login_html(body):
+        return "wechat_auth_required"
+    if _looks_like_wechat_security_verification_html(body):
+        return "wechat_security_verification_required"
+    return ""
+
+
+def _merge_fetched_fields_into_analysis(analysis, fetched):
+    if not isinstance(analysis, dict) or analysis.get("status") != "ok":
+        return analysis, False
+    updated = dict(analysis)
+    changed = False
+    fetched_published_at = fetched.get("published_at") or fetched.get("date") or ""
+    normalized_account = _normalize_effective_account_name(fetched.get("account"))
+    field_pairs = {
+        "title": fetched.get("title") or "",
+        "url": fetched.get("url") or "",
+        "published_at": fetched_published_at,
+        "date": fetched.get("date") or "",
+    }
+    if normalized_account:
+        field_pairs["account"] = normalized_account
+    for field, value in field_pairs.items():
+        if value and updated.get(field) != value:
+            updated[field] = value
+            changed = True
+    return updated, changed
 
 def _emit_auth_expired(reason: str, detail: str = ""):
     msg = f"[{_ts_now()}] WECHAT_AUTH_EXPIRED reason={reason}"
@@ -78,6 +247,27 @@ def _looks_like_wechat_login_html(text: str) -> bool:
     if "js_login" in s and "mp.weixin" in s:
         return True
     return False
+
+
+def _looks_like_wechat_security_verification_html(text: str) -> bool:
+    if not text:
+        return False
+    s = text.lower()
+    if 'id="js_content"' in s or "id='js_content'" in s:
+        return False
+    strong_markers = (
+        "完成安全验证后继续访问",
+        "需完成安全验证后继续访问",
+        "访问过于频繁",
+        "当前环境异常",
+    )
+    if any(marker in text for marker in strong_markers):
+        return True
+    keyword_hits = sum(1 for marker in ("安全验证", "访问过于频繁", "环境异常") if marker in text)
+    if keyword_hits < 2:
+        return False
+    page_markers = ("<title>环境异常", "<title>安全验证", "wx-errcode", "weui-msg", "请选择正常环境打开")
+    return any(marker in text or marker in s for marker in page_markers)
 
 def _parse_grouped_account_names(text: str):
     group = "未分组"
@@ -395,6 +585,9 @@ def fetch_article_markdown(article, headers, account_name=None):
     resp = requests.get(url, headers=headers)
     resp.encoding = "utf-8"
     content_html = resp.text
+    access_error = _detect_wechat_article_access_error(content_html)
+    if access_error:
+        raise RuntimeError(access_error)
     title = _extract_title_from_html(content_html, fallback=title)
 
     # 如果 API 没有返回时间，尝试从 HTML 中提取
@@ -622,32 +815,173 @@ def send_serverchan_message_once(
         pass
     return res
 
-def build_serverchan_markdown(article_info):
+
+def _resolve_serverchan_summary_url(config=None):
+    cfg = get_analysis_config(config or {})
+    public_base_url = str(cfg.get("analysis_public_base_url") or "").strip().rstrip("/")
+    if public_base_url:
+        return f"{public_base_url}/article_analysis"
+    return "/article_analysis"
+
+
+def _build_article_payload(fetched, account_override=""):
+    fetched = dict(fetched or {})
+    payload_account = (
+        _normalize_effective_account_name(fetched.get("account"))
+        or _normalize_effective_account_name(account_override)
+        or str(fetched.get("account") or account_override or "")
+    )
+    return {
+        "account": payload_account,
+        "title": fetched.get("title", ""),
+        "date": fetched.get("date", ""),
+        "published_at": fetched.get("published_at") or fetched.get("date") or "",
+        "url": fetched.get("url", ""),
+    }
+
+def _pending_async_analysis_payload(kind="analysis"):
+    return {"status": "pending", "reason": "scheduled_async", "kind": kind}
+
+
+def _async_jobs_dir() -> Path:
+    path = OUTPUT_ROOT / "async_jobs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _serialize_async_job(name, func, args, kwargs):
+    kwargs = dict(kwargs or {})
+    if func is _attach_single_article_analysis:
+        config = args[0] if len(args) > 0 else kwargs.get("config")
+        fetched = args[1] if len(args) > 1 else kwargs.get("fetched")
+        refresh_index = args[2] if len(args) > 2 else kwargs.get("refresh_index", True)
+        force_reanalyze = args[3] if len(args) > 3 else kwargs.get("force_reanalyze", False)
+        return {
+            "name": name,
+            "job_type": "single_article_analysis",
+            "payload": {
+                "config": config,
+                "fetched": fetched,
+                "refresh_index": refresh_index,
+                "force_reanalyze": force_reanalyze,
+            },
+        }
+    if func is _run_batch_analysis_pipeline:
+        config = args[0] if len(args) > 0 else kwargs.get("config")
+        changed_articles = args[1] if len(args) > 1 else kwargs.get("changed_articles")
+        per_account_payloads = args[2] if len(args) > 2 else kwargs.get("per_account_payloads")
+        headers = args[3] if len(args) > 3 else kwargs.get("headers")
+        return {
+            "name": name,
+            "job_type": "batch_analysis_pipeline",
+            "payload": {
+                "config": config,
+                "changed_articles": changed_articles,
+                "per_account_payloads": per_account_payloads,
+                "headers": headers,
+            },
+        }
+    raise ValueError(f"unsupported_async_job:{getattr(func, '__name__', type(func).__name__)}")
+
+
+def _write_async_job_file(job):
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(job.get("name") or "async_job")).strip("._") or "async_job"
+    stamp = f"{int(time.time() * 1000)}_{hashlib.sha1(json.dumps(job, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:10]}"
+    job_path = _async_jobs_dir() / f"{safe_name}_{stamp}.json"
+    job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+    return job_path
+
+
+def _spawn_async_job_process(job_path):
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--run-async-job-file", str(job_path)]
+    return subprocess.Popen(
+        cmd,
+        cwd=str(REPO_ROOT),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _run_async_job_file(job_file):
+    job_path = Path(job_file)
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        job_type = str(job.get("job_type") or "").strip()
+        payload = job.get("payload") or {}
+        if job_type == "single_article_analysis":
+            _attach_single_article_analysis(
+                payload.get("config"),
+                payload.get("fetched"),
+                refresh_index=bool(payload.get("refresh_index", True)),
+                force_reanalyze=bool(payload.get("force_reanalyze", False)),
+            )
+            return
+        if job_type == "batch_analysis_pipeline":
+            _run_batch_analysis_pipeline(
+                payload.get("config"),
+                payload.get("changed_articles") or [],
+                payload.get("per_account_payloads") or [],
+                payload.get("headers") or {},
+            )
+            return
+        raise ValueError(f"unsupported_async_job_type:{job_type}")
+    finally:
+        try:
+            job_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _schedule_async_job(name, func, *args, **kwargs):
+    if _ASYNC_JOB_DISPATCH_MODE == "process":
+        job = _serialize_async_job(name, func, args, kwargs)
+        job_path = _write_async_job_file(job)
+        process = _spawn_async_job_process(job_path)
+        return {"status": "scheduled", "name": name, "mode": "process", "pid": getattr(process, "pid", None)}
+
+    def runner():
+        try:
+            func(*args, **kwargs)
+        except Exception as exc:
+            print(f"[{_ts_now()}] WARN async job {name} failed: {type(exc).__name__}:{exc}")
+
+    thread = threading.Thread(target=runner, name=name, daemon=True)
+    thread.start()
+    return {"status": "scheduled", "name": name, "mode": "thread"}
+
+
+def build_serverchan_markdown(article_info, config=None):
     title = article_info.get("title") or "(无标题)"
-    url = article_info.get("url") or ""
     account = article_info.get("account") or ""
     published_at = article_info.get("published_at") or article_info.get("date") or ""
-    display_title = f"[{published_at}] {title}".strip()
     lines = [
         f"**公众号：** {account}",
-        f"**标题：** {display_title}",
+        f"**时间：** {published_at}",
+        f"**标题：** {title}",
+        f"[查看解读汇总]({_resolve_serverchan_summary_url(config)})",
         "",
-        f"[阅读全文]({url})" if url else "",
-        ""
     ]
-    analysis_markdown = render_single_analysis_markdown(article_info.get("analysis"))
-    if analysis_markdown:
-        lines.extend([analysis_markdown, ""])
     return "\n".join([l for l in lines if l is not None])
 
 
-def _attach_single_article_analysis(config, fetched):
-    cfg = get_analysis_config(config)
+
+def _attach_single_article_analysis(config, fetched, refresh_index: bool = True, force_reanalyze: bool = False):
+    effective_config = _copy_config_with_forced_reanalyze(config) if force_reanalyze else config
+    cfg = get_analysis_config(effective_config)
     if not cfg.get("analysis_enabled"):
         return None
+    try:
+        from . import article_analysis as _article_analysis_module
+    except Exception:
+        try:
+            import article_analysis as _article_analysis_module
+        except Exception:
+            _article_analysis_module = None
     analysis = analyze_single_article(
-        config,
+        effective_config,
         {
+            "article_id": _normalize_article_id(fetched.get("article_id")),
             "account": fetched.get("account"),
             "title": fetched.get("title"),
             "date": fetched.get("date"),
@@ -656,8 +990,271 @@ def _attach_single_article_analysis(config, fetched):
             "markdown": fetched.get("markdown", ""),
         },
     )
-    persist_single_analysis_outputs(config, analysis)
+    metadata_changed = False
+    if isinstance(analysis, dict) and analysis.get("article_id"):
+        analysis, metadata_changed = _merge_fetched_fields_into_analysis(analysis, fetched)
+        if (
+            metadata_changed
+            or analysis.get("status") != "ok"
+            or _article_analysis_module is None
+            or analyze_single_article is not _article_analysis_module.analyze_single_article
+        ):
+            persist_single_analysis_outputs(effective_config, analysis)
+    if refresh_index and isinstance(analysis, dict) and analysis.get("article_id"):
+        _refresh_analysis_index_html(effective_config)
     return analysis
+
+
+def run_reanalyze_from_url(
+    article_url,
+    account_name=None,
+    article_id=None,
+    save_markdown=False,
+    output_json_path=None,
+    serverchan_sendkey=None,
+    push=True,
+    config=None,
+):
+    if not _is_allowed_reanalyze_url(article_url):
+        raise ValueError("invalid_url")
+    config = _copy_config_with_forced_reanalyze(config)
+    resolved_account = _resolve_reanalyze_account_name(
+        config,
+        article_id=article_id,
+        payload_account=account_name,
+    )
+    cookie = config.get("cookie")
+    token = config.get("token")
+    if cookie and token:
+        headers = get_headers(cookie, token)
+        headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    else:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+    article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
+    fetched = fetch_article_markdown(article, headers, account_name=resolved_account or None)
+    fetched = dict(fetched or {})
+    if article_id and not fetched.get("article_id"):
+        fetched["article_id"] = _normalize_article_id(article_id)
+    if resolved_account and not _normalize_effective_account_name(fetched.get("account")):
+        fetched["account"] = resolved_account
+    payload = _build_article_payload(fetched, account_override=resolved_account)
+
+    if push:
+        push_result = push_article_to_serverchan(config, payload, override_sendkey=serverchan_sendkey)
+        payload["serverchan"] = push_result
+    analysis = _attach_single_article_analysis(config, fetched, force_reanalyze=True)
+    payload["analysis"] = analysis
+
+    if save_markdown:
+        save_url_to_md(article, headers, account_name=account_name)
+
+    if output_json_path:
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return payload
+
+
+def handle_reanalyze_api_request(payload, config, request_headers=None):
+    if not isinstance(payload, dict):
+        return {"status": "error", "article_id": "", "reason": "invalid_payload"}
+    article_id = str(payload.get("article_id") or "").strip()
+    if request_headers is not None and not _is_trusted_local_reanalyze_source(request_headers, config):
+        return {"status": "error", "article_id": article_id, "reason": "forbidden_origin"}
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        return {"status": "error", "article_id": article_id, "reason": "missing_url"}
+    if not _is_allowed_reanalyze_url(url):
+        return {"status": "error", "article_id": article_id, "reason": "invalid_url"}
+    account_name = str(payload.get("account") or "").strip()
+    try:
+        result = run_reanalyze_from_url(
+            url,
+            account_name=account_name,
+            article_id=article_id,
+            save_markdown=False,
+            push=False,
+            config=config,
+        )
+    except Exception as exc:
+        explicit_reason = str(exc or "").strip()
+        if explicit_reason in ("wechat_auth_required", "wechat_security_verification_required"):
+            return {"status": "error", "article_id": article_id, "reason": explicit_reason}
+        return {"status": "error", "article_id": article_id, "reason": f"reanalyze_failed:{type(exc).__name__}:{exc}"}
+    analysis = result.get("analysis") if isinstance(result, dict) else None
+    analysis_status = ""
+    if isinstance(analysis, dict):
+        analysis_status = str(analysis.get("status") or "").strip()
+    analysis_is_ok = isinstance(analysis, dict) and (
+        analysis_status == "ok" or (not analysis_status and analysis.get("article_id"))
+    )
+    if not analysis_is_ok:
+        reason = ""
+        if isinstance(analysis, dict):
+            reason = str(analysis.get("reason") or analysis.get("status") or "").strip()
+        return {"status": "error", "article_id": article_id or str((analysis or {}).get("article_id") or ""), "reason": reason or "reanalyze_failed"}
+    return {
+        "status": "ok",
+        "article_id": str(analysis.get("article_id") or article_id),
+        "account": str(result.get("account") or analysis.get("account") or ""),
+        "title": str(result.get("title") or analysis.get("title") or ""),
+        "source": str(result.get("source") or analysis.get("source") or ""),
+    }
+
+
+def make_reanalyze_request_handler(config):
+    expected_path = _resolve_reanalyze_api_path(config)
+
+    class ReanalyzeHandler(BaseHTTPRequestHandler):
+        def _trusted_origin(self):
+            if not _is_trusted_local_reanalyze_source(self.headers, config):
+                return ""
+            origin = str(self.headers.get("Origin") or "").strip()
+            if origin:
+                return origin
+            referer = str(self.headers.get("Referer") or "").strip()
+            if referer:
+                try:
+                    parsed = urlparse(referer)
+                    if parsed.scheme in ("http", "https") and parsed.netloc:
+                        return f"{parsed.scheme}://{parsed.netloc}"
+                except Exception:
+                    return ""
+            return ""
+
+        def _send_json(self, status_code, payload):
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            trusted_origin = self._trusted_origin()
+            if trusted_origin:
+                self.send_header("Access-Control-Allow-Origin", trusted_origin)
+                self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            if not _is_trusted_local_reanalyze_source(self.headers, config):
+                self._send_json(403, {"status": "error", "reason": "forbidden_origin"})
+                return
+            self.send_response(204)
+            trusted_origin = self._trusted_origin()
+            if trusted_origin:
+                self.send_header("Access-Control-Allow-Origin", trusted_origin)
+                self.send_header("Vary", "Origin")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def do_POST(self):
+            if urlparse(self.path).path != expected_path:
+                self._send_json(404, {"status": "error", "reason": "not_found"})
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                content_length = 0
+            raw = self.rfile.read(content_length) if content_length > 0 else b""
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                self._send_json(400, {"status": "error", "reason": "invalid_json"})
+                return
+            result = handle_reanalyze_api_request(payload, config, request_headers=self.headers)
+            status_code = 200 if result.get("status") == "ok" else 400
+            if result.get("reason") == "forbidden_origin":
+                status_code = 403
+            self._send_json(status_code, result)
+
+        def log_message(self, format, *args):
+            print(f"[{_ts_now()}] reanalyze-api {self.address_string()} {format % args}")
+
+    return ReanalyzeHandler
+
+
+def run_reanalyze_api_server(config, host="127.0.0.1", port=8766):
+    server = ThreadingHTTPServer((host, int(port)), make_reanalyze_request_handler(config))
+    print(
+        f"[{_ts_now()}] reanalyze api listening on http://{host}:{int(port)}{_resolve_reanalyze_api_path(config)}"
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print(f"[{_ts_now()}] reanalyze api stopped")
+    finally:
+        server.server_close()
+
+
+def make_analysis_static_request_handler(config, directory=None):
+    static_directory = str(directory or OUTPUT_ROOT)
+    expected_path = _resolve_reanalyze_api_path(config)
+
+    class AnalysisStaticHandler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=static_directory, **kwargs)
+
+        def _send_json(self, status_code, payload):
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if urlparse(self.path).path != expected_path:
+                self._send_json(404, {"status": "error", "reason": "not_found"})
+                return
+            try:
+                content_length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                content_length = 0
+            raw = self.rfile.read(content_length) if content_length > 0 else b""
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                self._send_json(400, {"status": "error", "reason": "invalid_json"})
+                return
+            result = handle_reanalyze_api_request(payload, config, request_headers=None)
+            reason = str(result.get("reason") or "").strip()
+            status_code = 200 if result.get("status") == "ok" else 400
+            if reason == "forbidden_origin":
+                status_code = 403
+            elif reason == "not_found":
+                status_code = 404
+            elif reason.startswith("reanalyze_failed"):
+                status_code = 500
+            self._send_json(status_code, result)
+
+        def log_message(self, format, *args):
+            print(f"[{_ts_now()}] analysis-static {self.address_string()} {format % args}")
+
+    return AnalysisStaticHandler
+
+
+def run_analysis_static_server(config, host="127.0.0.1", port=8765, directory=None):
+    static_directory = str(directory or OUTPUT_ROOT)
+    server = ThreadingHTTPServer(
+        (host, int(port)),
+        make_analysis_static_request_handler(config, directory=static_directory),
+    )
+    print(
+        f"[{_ts_now()}] analysis static listening on http://{host}:{int(port)} "
+        f"(root={static_directory}, reanalyze={_resolve_reanalyze_api_path(config)})"
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print(f"[{_ts_now()}] analysis static stopped")
+    finally:
+        server.server_close()
 
 def push_article_to_serverchan(config, article_info, override_sendkey=None):
     sendkey = _get_serverchan_sendkey(config, override_sendkey=override_sendkey)
@@ -665,7 +1262,7 @@ def push_article_to_serverchan(config, article_info, override_sendkey=None):
         return {"ok": False, "skipped": True, "reason": "no_sendkey"}
     published_at = article_info.get("published_at") or article_info.get("date") or ""
     msg_title = f"{article_info.get('account') or ''} [{published_at}] {article_info.get('title') or ''}".strip()
-    desp = build_serverchan_markdown(article_info)
+    desp = build_serverchan_markdown(article_info, config=config)
     return send_serverchan_message(sendkey, msg_title, desp)
 
 def _load_accounts_from_json(path: str):
@@ -772,7 +1369,8 @@ def _extract_latest_payload_for_account(fakeid: str, account_name: str, token: s
         "_raw_article": chosen,
     }
 
-def build_serverchan_markdown_articles(articles, batch_analysis=None):
+def build_serverchan_markdown_articles(articles, batch_analysis=None, config=None):
+    _ = batch_analysis
     lines = []
     groups = {}
     group_rank = {}
@@ -792,20 +1390,10 @@ def build_serverchan_markdown_articles(articles, batch_analysis=None):
             account = a.get("account") or ""
             title = a.get("title") or "(无标题)"
             published_at = a.get("published_at") or a.get("date") or ""
-            url = a.get("url") or ""
-            label = f"{account} [{published_at}] {title}".strip()
-            if url:
-                lines.append(f"- [{label}]({url})")
-            else:
-                lines.append(f"- {label}")
-            analysis_markdown = render_single_analysis_markdown(a.get("analysis"))
-            if analysis_markdown:
-                lines.extend(["", analysis_markdown])
+            label = f"{account} | {published_at} | {title}".strip(" |")
+            lines.append(f"- {label}")
         lines.append("")
-
-    batch_markdown = render_batch_analysis_markdown(batch_analysis)
-    if batch_markdown:
-        lines.extend([batch_markdown, ""])
+    lines.extend([f"[查看解读汇总]({_resolve_serverchan_summary_url(config)})", ""])
 
     return "\n".join([l for l in lines if l is not None]).rstrip()
 
@@ -816,8 +1404,78 @@ def push_articles_to_serverchan(config, articles, override_sendkey=None, batch_a
     title = f"公众号最新文章（{len(articles)}篇）"
     cfg = get_analysis_config(config)
     batch_block = batch_analysis if cfg.get("analysis_push_batch", True) else None
-    desp = build_serverchan_markdown_articles(articles, batch_analysis=batch_block)
+    desp = build_serverchan_markdown_articles(articles, batch_analysis=batch_block, config=config)
     return send_serverchan_message(sendkey, title, desp)
+
+
+def _update_push_state(state, state_path, changed_articles, pushed_fakeids):
+    if not pushed_fakeids:
+        return
+    now_ts = int(time.time())
+    for a in changed_articles:
+        fid = a.get("fakeid")
+        if (not fid) or (fid not in pushed_fakeids):
+            continue
+        state[fid] = {
+            "last_pushed_url": a.get("url"),
+            "last_pushed_title": a.get("title"),
+            "last_pushed_published_at": a.get("published_at"),
+            "updated_at": now_ts,
+        }
+    if state_path:
+        save_json(state_path, state)
+
+
+def _collect_batch_source_map(per_account_payloads):
+    source_by_key = {}
+    for payload in per_account_payloads:
+        key = payload.get("fakeid") or payload.get("url")
+        if key:
+            source_by_key[key] = payload
+    return source_by_key
+
+
+def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads, headers):
+    analysis_items = []
+    batch_analysis = None
+    source_by_key = _collect_batch_source_map(per_account_payloads)
+    batch_id = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    analysis_cfg = get_analysis_config(config)
+    if analysis_cfg.get("analysis_enabled"):
+        for article in changed_articles:
+            source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
+            fetched = source.get("_fetched_article")
+            if not fetched:
+                raw = source.get("_raw_article")
+                if raw:
+                    try:
+                        fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
+                    except Exception:
+                        fetched = None
+            if fetched:
+                analysis = _attach_single_article_analysis(config, fetched, refresh_index=False)
+            else:
+                analysis = {"status": "skipped", "reason": "missing_article_body"}
+            article["analysis"] = analysis
+            analysis_items.append(
+                {
+                    "status": analysis.get("status"),
+                    "account": article.get("account"),
+                    "title": article.get("title"),
+                    "topic": analysis.get("topic"),
+                    "core_points": analysis.get("core_points"),
+                    "summary": analysis.get("summary"),
+                }
+            )
+        batch_analysis = summarize_analysis_batch(config, analysis_items, batch_id=batch_id)
+        if isinstance(batch_analysis, dict) and batch_analysis.get("status") == "ok":
+            persist_batch_analysis_outputs(config, batch_analysis)
+        _refresh_analysis_index_html(config)
+        return batch_analysis
+
+    for article in changed_articles:
+        article["analysis"] = {"status": "skipped", "reason": "analysis_disabled"}
+    return {"status": "skipped", "reason": "analysis_disabled", "batch_id": batch_id}
 
 def run_push_latest_all(
     config,
@@ -929,49 +1587,7 @@ def run_push_latest_all(
             ordered.extend(grouped[g])
         changed_articles = ordered
 
-    analysis_items = []
     batch_analysis = None
-    source_by_key = {}
-    for payload in per_account_payloads:
-        key = payload.get("fakeid") or payload.get("url")
-        if key:
-            source_by_key[key] = payload
-    if changed_articles:
-        batch_id = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        analysis_cfg = get_analysis_config(config)
-        if analysis_cfg.get("analysis_enabled"):
-            for article in changed_articles:
-                source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
-                fetched = source.get("_fetched_article")
-                if not fetched:
-                    raw = source.get("_raw_article")
-                    if raw:
-                        try:
-                            fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
-                        except Exception:
-                            fetched = None
-                if fetched:
-                    analysis = _attach_single_article_analysis(config, fetched)
-                else:
-                    analysis = {"status": "skipped", "reason": "missing_article_body"}
-                article["analysis"] = analysis
-                analysis_items.append(
-                    {
-                        "status": analysis.get("status"),
-                        "account": article.get("account"),
-                        "title": article.get("title"),
-                        "topic": analysis.get("topic"),
-                        "core_points": analysis.get("core_points"),
-                    }
-                )
-            batch_analysis = summarize_analysis_batch(config, analysis_items, batch_id=batch_id)
-            if batch_analysis.get("status") == "ok":
-                persist_batch_analysis_outputs(config, batch_analysis)
-        else:
-            for article in changed_articles:
-                article["analysis"] = {"status": "skipped", "reason": "analysis_disabled"}
-            batch_analysis = {"status": "skipped", "reason": "analysis_disabled", "batch_id": batch_id}
-
     push_result = None
     pushed_fakeids = set()
     if push and changed_articles:
@@ -997,27 +1613,31 @@ def run_push_latest_all(
                         pushed_fakeids.add(a["fakeid"])
     if push and (not changed_articles):
         push_result = {"ok": True, "skipped": True, "reason": "no_change"}
+    _update_push_state(state, state_path, changed_articles, pushed_fakeids)
+
+    batch_analysis = None
+    if changed_articles:
+        analysis_cfg = get_analysis_config(config)
+        if push and analysis_cfg.get("analysis_enabled"):
+            for article in changed_articles:
+                article["analysis"] = _pending_async_analysis_payload("single_article")
+            batch_analysis = _pending_async_analysis_payload("batch_summary")
+            _schedule_async_job(
+                "push_latest_all_analysis",
+                _run_batch_analysis_pipeline,
+                config,
+                [dict(article) for article in changed_articles],
+                [dict(payload) for payload in per_account_payloads],
+                dict(headers),
+            )
+        else:
+            batch_analysis = _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads, headers)
 
     if save_markdown and per_account_payloads:
         for p in per_account_payloads:
             raw = p.get("_raw_article")
             if raw:
                 save_url_to_md(raw, headers, account_name=p.get("account"))
-
-    if pushed_fakeids:
-        now_ts = int(time.time())
-        for a in changed_articles:
-            fid = a.get("fakeid")
-            if (not fid) or (fid not in pushed_fakeids):
-                continue
-            state[fid] = {
-                "last_pushed_url": a.get("url"),
-                "last_pushed_title": a.get("title"),
-                "last_pushed_published_at": a.get("published_at"),
-                "updated_at": now_ts,
-            }
-        if state_path:
-            save_json(state_path, state)
 
     payload_articles = []
     for article in changed_articles:
@@ -1030,6 +1650,17 @@ def run_push_latest_all(
         "serverchan": push_result if push else {"ok": False, "skipped": True, "reason": "no_push"},
         "push_state_file": state_path,
     }
+    try:
+        analysis_cfg = get_analysis_config(config)
+    except Exception:
+        analysis_cfg = {}
+    if (
+        isinstance(analysis_cfg, dict)
+        and analysis_cfg.get("analysis_enabled")
+        and changed_articles
+        and not (push and changed_articles)
+    ):
+        _refresh_analysis_index_html(config)
     print(json.dumps(payload_out, ensure_ascii=False, indent=2))
     return payload_out
 
@@ -1068,19 +1699,19 @@ def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_mark
 
     chosen = best
     fetched = best_fetched
-    analysis = _attach_single_article_analysis(config, fetched)
-    payload = {
-        "account": fetched["account"],
-        "title": fetched["title"],
-        "date": fetched["date"],
-        "published_at": fetched.get("published_at") or fetched["date"],
-        "url": fetched["url"],
-        "analysis": analysis,
-    }
+    payload = _build_article_payload(fetched, account_override=target_account_name)
 
     if push:
         push_result = push_article_to_serverchan(config, payload, override_sendkey=serverchan_sendkey)
         payload["serverchan"] = push_result
+        if get_analysis_config(config).get("analysis_enabled"):
+            payload["analysis"] = _pending_async_analysis_payload("single_article")
+            _schedule_async_job("extract_latest_analysis", _attach_single_article_analysis, config, dict(fetched))
+        else:
+            payload["analysis"] = None
+    else:
+        analysis = _attach_single_article_analysis(config, fetched)
+        payload["analysis"] = analysis
 
     if save_markdown:
         save_url_to_md(chosen, headers, account_name=target_account_name)
@@ -1106,19 +1737,19 @@ def run_extract_from_url(article_url, account_name=None, save_markdown=False, ou
         }
     article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
     fetched = fetch_article_markdown(article, headers, account_name=account_name)
-    analysis = _attach_single_article_analysis(config, fetched)
-    payload = {
-        "account": fetched["account"],
-        "title": fetched["title"],
-        "date": fetched["date"],
-        "published_at": fetched.get("published_at") or fetched["date"],
-        "url": fetched["url"],
-        "analysis": analysis,
-    }
+    payload = _build_article_payload(fetched, account_override=account_name)
 
     if push:
         push_result = push_article_to_serverchan(config, payload, override_sendkey=serverchan_sendkey)
         payload["serverchan"] = push_result
+        if get_analysis_config(config).get("analysis_enabled"):
+            payload["analysis"] = _pending_async_analysis_payload("single_article")
+            _schedule_async_job("extract_from_url_analysis", _attach_single_article_analysis, config, dict(fetched))
+        else:
+            payload["analysis"] = None
+    else:
+        analysis = _attach_single_article_analysis(config, fetched)
+        payload["analysis"] = analysis
 
     if save_markdown:
         save_url_to_md(article, headers, account_name=account_name)
@@ -1629,6 +2260,7 @@ def mode_update(fakeids, token, cookie, history, account_names):
     save_json(HISTORY_FILE, history)
 
 def main():
+    global _ASYNC_JOB_DISPATCH_MODE
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--refresh-auth", action="store_true")
     parser.add_argument("--refresh-auth-only", action="store_true")
@@ -1653,10 +2285,19 @@ def main():
     parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument("--serverchan-sendkey", type=str, default=None)
     parser.add_argument("--no-push", action="store_true")
+    parser.add_argument("--serve-reanalyze", action="store_true")
+    parser.add_argument("--serve-analysis-static", action="store_true")
+    parser.add_argument("--run-async-job-file", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     if not args.serverchan_sendkey:
         args.serverchan_sendkey = os.environ.get("SERVERCHAN_SENDKEY")
+
+    _load_env_into_process(REPO_ROOT)
+
+    if args.run_async_job_file:
+        _run_async_job_file(args.run_async_job_file)
+        return
 
     config = load_json(CONFIG_FILE)
     config_example = str(REPO_ROOT / "config.json.example")
@@ -1714,40 +2355,63 @@ def main():
             return
 
     if args.article_url:
-        run_extract_from_url(
-            args.article_url,
-            account_name=args.account,
-            save_markdown=not args.no_save_markdown,
-            output_json_path=args.output_json,
-            serverchan_sendkey=args.serverchan_sendkey,
-            push=not args.no_push,
-            config=config,
-        )
+        old_mode = _ASYNC_JOB_DISPATCH_MODE
+        try:
+            _ASYNC_JOB_DISPATCH_MODE = "process"
+            run_extract_from_url(
+                args.article_url,
+                account_name=args.account,
+                save_markdown=not args.no_save_markdown,
+                output_json_path=args.output_json,
+                serverchan_sendkey=args.serverchan_sendkey,
+                push=not args.no_push,
+                config=config,
+            )
+        finally:
+            _ASYNC_JOB_DISPATCH_MODE = old_mode
+        return
+
+    if args.serve_reanalyze:
+        run_reanalyze_api_server(config, host="127.0.0.1", port=8766)
+        return
+
+    if args.serve_analysis_static:
+        run_analysis_static_server(config, host="127.0.0.1", port=8765, directory=str(OUTPUT_ROOT))
         return
 
     if args.extract_latest:
-        run_extract_latest(
-            config,
-            account_name_arg=args.account,
-            fakeid_arg=args.fakeid,
-            save_markdown=not args.no_save_markdown,
-            output_json_path=args.output_json,
-            serverchan_sendkey=args.serverchan_sendkey,
-            push=not args.no_push
-        )
+        old_mode = _ASYNC_JOB_DISPATCH_MODE
+        try:
+            _ASYNC_JOB_DISPATCH_MODE = "process"
+            run_extract_latest(
+                config,
+                account_name_arg=args.account,
+                fakeid_arg=args.fakeid,
+                save_markdown=not args.no_save_markdown,
+                output_json_path=args.output_json,
+                serverchan_sendkey=args.serverchan_sendkey,
+                push=not args.no_push
+            )
+        finally:
+            _ASYNC_JOB_DISPATCH_MODE = old_mode
         return
 
     if args.push_latest_all:
-        run_push_latest_all(
-            config,
-            accounts_file=args.accounts_file,
-            push_state_file=args.push_state_file,
-            save_markdown=not args.no_save_markdown,
-            serverchan_sendkey=args.serverchan_sendkey,
-            push=not args.no_push,
-            force=args.force,
-            push_separately=args.push_separately,
-        )
+        old_mode = _ASYNC_JOB_DISPATCH_MODE
+        try:
+            _ASYNC_JOB_DISPATCH_MODE = "process"
+            run_push_latest_all(
+                config,
+                accounts_file=args.accounts_file,
+                push_state_file=args.push_state_file,
+                save_markdown=not args.no_save_markdown,
+                serverchan_sendkey=args.serverchan_sendkey,
+                push=not args.no_push,
+                force=args.force,
+                push_separately=args.push_separately,
+            )
+        finally:
+            _ASYNC_JOB_DISPATCH_MODE = old_mode
         return
 
     token = config.get("token")
