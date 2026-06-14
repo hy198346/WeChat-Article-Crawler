@@ -930,6 +930,288 @@ class TestArticleAnalysis(unittest.TestCase):
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_force_yuanbao_timeout_does_not_fallback_to_local(self):
+        def fake_post(url, json=None, timeout=0, headers=None):
+            raise article_analysis.requests.Timeout("boom")
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.requests.post = fake_post
+        article_analysis.call_ollama_chat = lambda config, prompt: self.fail(
+            "强制元宝模式不应回退到本地模型"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_force_provider": "yuanbao",
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "强制元宝超时",
+                        "published_at": "2026-06-14 09:00",
+                        "url": "https://mp.weixin.qq.com/s/force-yuanbao-timeout",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "news_interpret_timeout")
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_force_yuanbao_success_uses_remote_only(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"ok": True, "analysis": "只走元宝成功"}
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.requests.post = fake_post
+        article_analysis.call_ollama_chat = lambda config, prompt: self.fail(
+            "强制元宝成功时不应触发本地模型"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_force_provider": "yuanbao",
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "强制元宝成功",
+                        "published_at": "2026-06-14 09:05",
+                        "url": "https://mp.weixin.qq.com/s/force-yuanbao-success",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["summary"], "只走元宝成功")
+                self.assertEqual(result["source"], "yuanbao")
+                self.assertEqual(
+                    calls[0][0], "https://news.example.com/api/telegraph/interpret"
+                )
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_force_ollama_skips_remote_news_interpret(self):
+        def fail_post(url, json=None, timeout=0, headers=None):
+            raise AssertionError("强制本地模式不应请求元宝接口")
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.requests.post = fail_post
+        article_analysis.call_ollama_chat = (
+            lambda config, prompt: '{"summary":"仅本地模型输出"}'
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_force_provider": "ollama",
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "强制本地模型",
+                        "published_at": "2026-06-14 09:10",
+                        "url": "https://mp.weixin.qq.com/s/force-ollama-only",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["summary"], "仅本地模型输出")
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_force_provider_ignores_existing_cache(self):
+        article = {
+            "account": "测试号",
+            "title": "强制 provider 忽略缓存",
+            "published_at": "2026-06-14 10:00",
+            "url": "https://mp.weixin.qq.com/s/force-provider-ignore-cache",
+            "markdown": "# 正文",
+        }
+        article_id = article_analysis.build_article_id(article)
+        cached = {
+            "status": "ok",
+            "article_id": article_id,
+            "account": "测试号",
+            "title": "旧缓存标题",
+            "url": article["url"],
+            "published_at": article["published_at"],
+            "date": "",
+            "summary": "旧缓存结果",
+            "topic": "",
+            "core_points": [],
+            "audience": "",
+            "risks": [],
+            "source": "cache",
+        }
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        try:
+            for provider in ("yuanbao", "ollama"):
+                with self.subTest(provider=provider):
+                    with tempfile.TemporaryDirectory() as d:
+                        cache_path = Path(d) / "article_analysis" / f"{article_id}.json"
+                        cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        cache_path.write_text(
+                            json.dumps(cached, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+
+                        remote_calls = []
+
+                        def fake_post(url, json=None, timeout=0, headers=None):
+                            remote_calls.append(url)
+
+                            class Resp:
+                                status_code = 200
+
+                                def raise_for_status(self):
+                                    return None
+
+                                def json(self):
+                                    return {"ok": True, "analysis": "强制元宝新结果"}
+
+                            return Resp()
+
+                        local_calls = []
+                        article_analysis.requests.post = fake_post
+                        article_analysis.call_ollama_chat = (
+                            lambda config, prompt: local_calls.append(prompt)
+                            or '{"summary":"强制本地新结果"}'
+                        )
+
+                        result = article_analysis.analyze_single_article(
+                            {
+                                "analysis_enabled": True,
+                                "analysis_force_provider": provider,
+                                "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                                "analysis_output_dir": d,
+                                "analysis_skip_if_exists": True,
+                            },
+                            article,
+                        )
+
+                        self.assertNotEqual(result["summary"], "旧缓存结果")
+                        if provider == "yuanbao":
+                            self.assertEqual(result["summary"], "强制元宝新结果")
+                            self.assertEqual(result["source"], "yuanbao")
+                            self.assertEqual(
+                                remote_calls,
+                                ["https://news.example.com/api/telegraph/interpret"],
+                            )
+                            self.assertEqual(local_calls, [])
+                        else:
+                            self.assertEqual(result["summary"], "强制本地新结果")
+                            self.assertEqual(result["source"], "local")
+                            self.assertEqual(remote_calls, [])
+                            self.assertEqual(len(local_calls), 1)
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_force_provider_failure_preserves_existing_success_cache(self):
+        article = {
+            "account": "测试号",
+            "title": "强制 provider 失败保留旧缓存",
+            "published_at": "2026-06-14 10:20",
+            "url": "https://mp.weixin.qq.com/s/force-provider-preserve-cache",
+            "markdown": "# 正文",
+        }
+        article_id = article_analysis.build_article_id(article)
+        cached = {
+            "status": "ok",
+            "article_id": article_id,
+            "account": "测试号",
+            "title": article["title"],
+            "url": article["url"],
+            "published_at": article["published_at"],
+            "date": "",
+            "summary": "旧成功缓存结果",
+            "topic": "",
+            "core_points": [],
+            "audience": "",
+            "risks": [],
+            "source": "cache",
+        }
+        cached_text = json.dumps(cached, ensure_ascii=False, indent=2)
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        try:
+            for provider, expected_reason in (
+                ("yuanbao", "news_interpret_timeout"),
+                ("ollama", "ollama_timeout"),
+            ):
+                with self.subTest(provider=provider):
+                    with tempfile.TemporaryDirectory() as d:
+                        cache_path = Path(d) / "article_analysis" / f"{article_id}.json"
+                        cache_path.parent.mkdir(parents=True, exist_ok=True)
+                        cache_path.write_text(cached_text, encoding="utf-8")
+
+                        def fail_remote(url, json=None, timeout=0, headers=None):
+                            raise requests.Timeout("forced timeout")
+
+                        article_analysis.requests.post = fail_remote
+                        article_analysis.call_ollama_chat = lambda config, prompt: (_ for _ in ()).throw(
+                            requests.Timeout("forced timeout")
+                        )
+
+                        result = article_analysis.analyze_single_article(
+                            {
+                                "analysis_enabled": True,
+                                "analysis_force_provider": provider,
+                                "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                                "analysis_output_dir": d,
+                                "analysis_skip_if_exists": True,
+                                "analysis_save_json": True,
+                                "analysis_save_markdown": False,
+                            },
+                            article,
+                        )
+
+                        self.assertEqual(result["status"], "skipped")
+                        self.assertEqual(result["reason"], expected_reason)
+                        self.assertNotEqual(result.get("summary"), "旧成功缓存结果")
+                        self.assertEqual(cache_path.read_text(encoding="utf-8"), cached_text)
+                        self.assertEqual(
+                            json.loads(cache_path.read_text(encoding="utf-8"))["summary"],
+                            "旧成功缓存结果",
+                        )
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
     def test_build_single_article_prompt_requests_summary_only(self):
         prompt = article_analysis._build_single_article_prompt(
             {
@@ -1547,7 +1829,7 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
         self.assertEqual(func("Unknown_Account"), "Unknown_Account")
         self.assertEqual(func("   "), "Unknown_Account")
 
-    def test_render_analysis_item_html_renders_reanalyze_button_with_url(self):
+    def test_render_analysis_item_html_renders_provider_reanalyze_buttons_with_url(self):
         html = article_analysis._render_analysis_item_html(
             {
                 "article_id": "aid-123",
@@ -1561,13 +1843,19 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             }
         )
 
-        self.assertIn("重新解读", html)
-        self.assertIn('class="reanalyze-button"', html)
-        self.assertIn('data-article-id="aid-123"', html)
-        self.assertIn('data-url="https://mp.weixin.qq.com/s/with-url"', html)
+        self.assertEqual(html.count('class="reanalyze-button"'), 2)
+        self.assertIn("元宝解读", html)
+        self.assertIn("本地模型解读", html)
+        self.assertEqual(html.count('data-article-id="aid-123"'), 2)
+        self.assertEqual(
+            html.count('data-url="https://mp.weixin.qq.com/s/with-url"'),
+            2,
+        )
+        self.assertIn('data-provider="yuanbao"', html)
+        self.assertIn('data-provider="ollama"', html)
         self.assertNotIn("disabled", html)
 
-    def test_render_analysis_item_html_disables_reanalyze_button_without_url(self):
+    def test_render_analysis_item_html_disables_provider_reanalyze_buttons_without_url(self):
         html = article_analysis._render_analysis_item_html(
             {
                 "article_id": "aid-456",
@@ -1580,9 +1868,12 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             }
         )
 
-        self.assertIn("重新解读", html)
-        self.assertIn('class="reanalyze-button"', html)
-        self.assertIn("disabled", html)
+        self.assertEqual(html.count('class="reanalyze-button"'), 2)
+        self.assertIn("元宝解读", html)
+        self.assertIn("本地模型解读", html)
+        self.assertEqual(html.count("disabled"), 2)
+        self.assertIn('data-provider="yuanbao"', html)
+        self.assertIn('data-provider="ollama"', html)
         self.assertIn("缺少原文链接，无法重解读", html)
 
     def test_render_analysis_item_html_prefers_normalized_summary(self):
@@ -2405,7 +2696,7 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertNotIn("Unknown_Account", html)
             self.assertNotIn(">Unknown<", html)
 
-    def test_build_analysis_index_html_injects_reanalyze_script_with_relative_api_url_by_default(self):
+    def test_build_analysis_index_html_injects_provider_reanalyze_contract_with_relative_api_url_by_default(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "article_analysis"
             root.mkdir(parents=True, exist_ok=True)
@@ -2434,11 +2725,17 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn('const REANALYZE_API_URL = "/api/reanalyze";', html)
             self.assertNotIn("http://127.0.0.1:8766/api/reanalyze", html)
             self.assertIn("fetch(REANALYZE_API_URL", html)
-            self.assertIn("重新解读中...", html)
-            self.assertIn("重新解读成功，正在刷新...", html)
-            self.assertIn("重新解读失败", html)
+            self.assertIn('data-provider="yuanbao"', html)
+            self.assertIn('data-provider="ollama"', html)
+            self.assertRegex(html, r'body\s*:\s*.*provider')
+            self.assertIn("元宝解读中...", html)
+            self.assertIn("元宝解读成功，正在刷新...", html)
+            self.assertIn("元宝解读失败，请稍后重试", html)
+            self.assertIn("本地模型解读中...", html)
+            self.assertIn("本地模型解读成功，正在刷新...", html)
+            self.assertIn("本地模型解读失败，请稍后重试", html)
 
-    def test_build_analysis_index_html_uses_generic_reanalyze_error_message(self):
+    def test_build_analysis_index_html_uses_provider_specific_reanalyze_error_messages(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "article_analysis"
             root.mkdir(parents=True, exist_ok=True)
@@ -2464,9 +2761,49 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self._build_and_read_index_html(d)
             _, html = self._find_account_page(d, "号A")
 
-            self.assertIn('setReanalyzeStatus(button, "重新解读失败，请稍后重试", "is-error");', html)
+            self.assertIn("元宝解读失败，请稍后重试", html)
+            self.assertIn("本地模型解读失败，请稍后重试", html)
+            self.assertNotIn("重新解读失败，请稍后重试", html)
             self.assertNotIn("重新解读失败：${message}", html)
             self.assertNotIn("payload.reason", html)
+
+    def test_build_analysis_index_html_links_same_article_provider_buttons_busy_and_restore_contract(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "entry-shared-aid",
+                        "account": "号A",
+                        "title": "双 provider 文章",
+                        "url": "https://mp.weixin.qq.com/s/reanalyze-entry",
+                        "published_at": "2026-06-12 08:00",
+                        "topic": "主题",
+                        "core_points": ["观点"],
+                        "audience": "读者",
+                        "risks": ["风险"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
+
+            self.assertIn("function getRelatedReanalyzeButtons(button)", html)
+            self.assertIn(
+                'return (candidate.getAttribute("data-article-id") || "") === articleId;',
+                html,
+            )
+            self.assertIn("function setReanalyzeBusyState(button, busy)", html)
+            self.assertIn("candidate.disabled = busy;", html)
+            self.assertIn('candidate.classList.toggle("is-busy", busy);', html)
+            self.assertIn("setReanalyzeBusyState(button, true);", html)
+            self.assertIn("setReanalyzeBusyState(button, false);", html)
+            self.assertEqual(html.count('data-article-id="entry-shared-aid"'), 2)
 
     def test_build_analysis_index_html_uses_public_reanalyze_url_and_prefers_summary(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3055,17 +3392,157 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if old_build_index is not None:
                 wechat_crawler.build_analysis_index_html = old_build_index
 
+    def test_run_reanalyze_from_url_rewrites_config_for_provider_and_keeps_force_reanalyze(self):
+        captured = []
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_attach = wechat_crawler._attach_single_article_analysis
+        try:
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-14",
+                "published_at": "2026-06-14 10:00",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = lambda *args, **kwargs: self.fail(
+                "push=False 时不应推送"
+            )
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                captured.append(
+                    {
+                        "config": dict(config or {}),
+                        "refresh_index": refresh_index,
+                        "force_reanalyze": force_reanalyze,
+                        "fetched": dict(fetched or {}),
+                    }
+                )
+                return {
+                    "status": "ok",
+                    "article_id": "aid-provider-config",
+                    "source": str((config or {}).get("analysis_force_provider") or ""),
+                }
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+
+            expected_news_url = "https://news.example.com/api/telegraph/interpret"
+            for provider in ("yuanbao", "ollama"):
+                with self.subTest(provider=provider):
+                    payload = wechat_crawler.run_reanalyze_from_url(
+                        f"https://mp.weixin.qq.com/s/provider-{provider}",
+                        article_id=f"aid-provider-{provider}",
+                        provider=provider,
+                        push=False,
+                        config={
+                            "analysis_enabled": True,
+                            "analysis_skip_if_exists": True,
+                            "analysis_news_interpret_url": expected_news_url,
+                        },
+                    )
+
+                    self.assertEqual(payload["analysis"]["source"], provider)
+                    self.assertTrue(captured[-1]["force_reanalyze"])
+                    self.assertFalse(captured[-1]["config"]["analysis_skip_if_exists"])
+                    self.assertEqual(
+                        captured[-1]["config"]["analysis_force_provider"], provider
+                    )
+                    if provider == "yuanbao":
+                        self.assertEqual(
+                            captured[-1]["config"]["analysis_news_interpret_url"],
+                            expected_news_url,
+                        )
+                    else:
+                        self.assertEqual(
+                            captured[-1]["config"]["analysis_news_interpret_url"], ""
+                        )
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            wechat_crawler._attach_single_article_analysis = old_attach
+
+    def test_handle_reanalyze_api_request_passes_supported_provider_to_runner(self):
+        calls = []
+
+        old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
+        try:
+            wechat_crawler.run_reanalyze_from_url = (
+                lambda article_url, account_name=None, article_id=None, provider=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
+                    {
+                        "article_url": article_url,
+                        "account_name": account_name,
+                        "article_id": article_id,
+                        "provider": provider,
+                        "push": push,
+                    }
+                )
+                or {
+                    "analysis": {"article_id": "aid-provider", "source": provider},
+                    "account": "测试号",
+                    "title": "标题",
+                }
+            )
+
+            for provider in ("yuanbao", "ollama"):
+                with self.subTest(provider=provider):
+                    result = wechat_crawler.handle_reanalyze_api_request(
+                        {
+                            "article_id": f"aid-provider-{provider}",
+                            "url": f"https://mp.weixin.qq.com/s/api-provider-{provider}",
+                            "provider": provider,
+                        },
+                        {"analysis_enabled": True},
+                    )
+
+                    self.assertEqual(result["status"], "ok")
+                    self.assertEqual(calls[-1]["provider"], provider)
+                    self.assertEqual(result["source"], provider)
+        finally:
+            if old_runner is not None:
+                wechat_crawler.run_reanalyze_from_url = old_runner
+
+    def test_handle_reanalyze_api_request_rejects_missing_or_invalid_provider(self):
+        old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
+        try:
+            wechat_crawler.run_reanalyze_from_url = lambda *args, **kwargs: self.fail(
+                "provider 缺失或非法时不应进入重解读流程"
+            )
+
+            for payload in (
+                {"article_id": "aid-missing-provider", "url": "https://mp.weixin.qq.com/s/missing-provider"},
+                {
+                    "article_id": "aid-bad-provider",
+                    "url": "https://mp.weixin.qq.com/s/bad-provider",
+                    "provider": "auto",
+                },
+            ):
+                with self.subTest(payload=payload):
+                    result = wechat_crawler.handle_reanalyze_api_request(
+                        payload,
+                        {"analysis_enabled": True},
+                    )
+
+                    self.assertEqual(result["status"], "error")
+                    self.assertEqual(result["article_id"], payload["article_id"])
+                    self.assertEqual(result["reason"], "invalid_provider")
+        finally:
+            if old_runner is not None:
+                wechat_crawler.run_reanalyze_from_url = old_runner
+
     def test_handle_reanalyze_api_request_calls_force_reanalyze(self):
         calls = []
 
         old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
         try:
             wechat_crawler.run_reanalyze_from_url = (
-                lambda article_url, account_name=None, article_id=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
+                lambda article_url, account_name=None, article_id=None, provider=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
                     {
                         "article_url": article_url,
                         "account_name": account_name,
                         "article_id": article_id,
+                        "provider": provider,
                         "push": push,
                         "config": dict(config or {}),
                     }
@@ -3078,7 +3555,11 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             )
 
             result = wechat_crawler.handle_reanalyze_api_request(
-                {"article_id": "aid-1", "url": "https://mp.weixin.qq.com/s/api-reanalyze"},
+                {
+                    "article_id": "aid-1",
+                    "url": "https://mp.weixin.qq.com/s/api-reanalyze",
+                    "provider": "yuanbao",
+                },
                 {"analysis_enabled": True},
             )
 
@@ -3137,11 +3618,12 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
         old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
         try:
             wechat_crawler.run_reanalyze_from_url = (
-                lambda article_url, account_name=None, article_id=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
+                lambda article_url, account_name=None, article_id=None, provider=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
                     {
                         "article_url": article_url,
                         "account_name": account_name,
                         "article_id": article_id,
+                        "provider": provider,
                         "config": dict(config or {}),
                     }
                 )
@@ -3149,7 +3631,11 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             )
 
             result = wechat_crawler.handle_reanalyze_api_request(
-                {"article_id": "aid-public", "url": "https://mp.weixin.qq.com/s/public-origin"},
+                {
+                    "article_id": "aid-public",
+                    "url": "https://mp.weixin.qq.com/s/public-origin",
+                    "provider": "yuanbao",
+                },
                 {
                     "analysis_enabled": True,
                     "analysis_public_base_url": "https://wx.coco777.vip",
@@ -3170,11 +3656,12 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
         old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
         try:
             wechat_crawler.run_reanalyze_from_url = (
-                lambda article_url, account_name=None, article_id=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
+                lambda article_url, account_name=None, article_id=None, provider=None, save_markdown=False, output_json_path=None, serverchan_sendkey=None, push=True, config=None: calls.append(
                     {
                         "article_url": article_url,
                         "account_name": account_name,
                         "article_id": article_id,
+                        "provider": provider,
                     }
                 )
                 or {"analysis": {"article_id": "aid-3"}, "account": "前端账号", "title": "标题"}
@@ -3185,6 +3672,7 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                     "article_id": "aid-3",
                     "account": "前端账号",
                     "url": "https://mp.weixin.qq.com/s/api-account",
+                    "provider": "ollama",
                 },
                 {"analysis_enabled": True},
             )
@@ -3205,7 +3693,11 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             wechat_crawler.run_reanalyze_from_url = raise_login
 
             result = wechat_crawler.handle_reanalyze_api_request(
-                {"article_id": "aid-login", "url": "https://mp.weixin.qq.com/s/login-page"},
+                {
+                    "article_id": "aid-login",
+                    "url": "https://mp.weixin.qq.com/s/login-page",
+                    "provider": "yuanbao",
+                },
                 {"analysis_enabled": True},
                 request_headers={"Origin": "http://127.0.0.1:8765"},
             )
@@ -3421,7 +3913,11 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             wechat_crawler.run_reanalyze_from_url = raise_refresh
 
             result = wechat_crawler.handle_reanalyze_api_request(
-                {"article_id": "aid-refresh", "url": "https://mp.weixin.qq.com/s/refresh-fail"},
+                {
+                    "article_id": "aid-refresh",
+                    "url": "https://mp.weixin.qq.com/s/refresh-fail",
+                    "provider": "ollama",
+                },
                 {"analysis_enabled": True},
             )
 
@@ -3431,6 +3927,80 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
         finally:
             if old_runner is not None:
                 wechat_crawler.run_reanalyze_from_url = old_runner
+
+    def test_handle_reanalyze_api_request_preserves_success_cache_when_forced_provider_run_fails(self):
+        article_id = "aid-preserve-cache"
+        cached = {
+            "status": "ok",
+            "article_id": article_id,
+            "account": "测试号",
+            "title": "旧成功标题",
+            "url": "https://mp.weixin.qq.com/s/api-preserve-cache",
+            "published_at": "2026-06-14 11:00",
+            "date": "",
+            "summary": "旧成功缓存结果",
+            "topic": "",
+            "core_points": [],
+            "audience": "",
+            "risks": [],
+            "source": "cache",
+        }
+        cached_text = json.dumps(cached, ensure_ascii=False, indent=2)
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_build_index = getattr(wechat_crawler, "build_analysis_index_html", None)
+        old_crawler_analyze = getattr(wechat_crawler, "analyze_single_article", None)
+        old_analysis_local = article_analysis.call_ollama_chat
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                cache_path = Path(d) / "article_analysis" / f"{article_id}.json"
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(cached_text, encoding="utf-8")
+
+                wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                    "article_id": article_id,
+                    "account": "测试号",
+                    "title": "本次重解读标题",
+                    "date": "2026-06-14",
+                    "published_at": "2026-06-14 11:05",
+                    "url": article["link"],
+                    "markdown": "# 标题\n\n正文",
+                }
+                wechat_crawler.build_analysis_index_html = lambda config: None
+                wechat_crawler.analyze_single_article = article_analysis.analyze_single_article
+                article_analysis.call_ollama_chat = lambda config, prompt: (_ for _ in ()).throw(
+                    requests.Timeout("forced timeout")
+                )
+
+                result = wechat_crawler.handle_reanalyze_api_request(
+                    {
+                        "article_id": article_id,
+                        "url": "https://mp.weixin.qq.com/s/api-preserve-cache",
+                        "provider": "ollama",
+                    },
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_skip_if_exists": True,
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                    },
+                )
+
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["article_id"], article_id)
+                self.assertEqual(result["reason"], "ollama_timeout")
+                self.assertEqual(cache_path.read_text(encoding="utf-8"), cached_text)
+                self.assertEqual(
+                    json.loads(cache_path.read_text(encoding="utf-8"))["summary"],
+                    "旧成功缓存结果",
+                )
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            if old_build_index is not None:
+                wechat_crawler.build_analysis_index_html = old_build_index
+            if old_crawler_analyze is not None:
+                wechat_crawler.analyze_single_article = old_crawler_analyze
+            article_analysis.call_ollama_chat = old_analysis_local
 
     def test_main_supports_serve_reanalyze_cli(self):
         old_argv = list(wechat_crawler.sys.argv)

@@ -12,6 +12,7 @@ import requests
 
 DEFAULT_ANALYSIS_CONFIG = {
     "analysis_enabled": False,
+    "analysis_force_provider": "",
     "analysis_push_batch": True,
     "analysis_news_interpret_url": "",
     "analysis_base_url": "http://192.168.9.158:11434",
@@ -98,6 +99,9 @@ def get_analysis_config(config):
     if not public_base_url:
         public_base_url = _normalize_scalar_string(os.environ.get("WECHAT_ANALYSIS_PUBLIC_BASE_URL"))
     merged["analysis_public_base_url"] = public_base_url.rstrip("/")
+    merged["analysis_force_provider"] = _normalize_analysis_force_provider(
+        explicit.get("analysis_force_provider")
+    )
     if explicit.get("analysis_reanalyze_path") not in (None, ""):
         reanalyze_source = explicit.get("analysis_reanalyze_path")
     else:
@@ -203,6 +207,16 @@ def _is_valid_cached_single_analysis(data):
     )
 
 
+def _should_preserve_existing_success_cache(force_provider, cached, result) -> bool:
+    if not force_provider:
+        return False
+    if not _is_valid_cached_single_analysis(cached):
+        return False
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("status") or "").strip() != "ok"
+
+
 def _normalize_list(value):
     if value is None:
         return []
@@ -243,6 +257,18 @@ def _normalize_account_name(value):
     if lowered.startswith("gh_"):
         return "Unknown_Account"
     return text
+
+
+def _normalize_analysis_force_provider(value):
+    text = _normalize_scalar_string(value).lower()
+    return text if text in ("yuanbao", "ollama") else ""
+
+
+def _reanalyze_provider_specs():
+    return (
+        {"provider": "yuanbao", "label": "元宝解读"},
+        {"provider": "ollama", "label": "本地模型解读"},
+    )
 
 
 def _normalize_summary_text(value):
@@ -550,6 +576,7 @@ def _call_news_interpret(config, article):
     api_url = _normalize_scalar_string(cfg.get("analysis_news_interpret_url"))
     if not api_url:
         return None
+    provider = _normalize_analysis_force_provider(cfg.get("analysis_force_provider")) or "auto"
     response = requests.post(
         api_url,
         json={
@@ -557,7 +584,7 @@ def _call_news_interpret(config, article):
             "content": _truncate_markdown(article.get("markdown", ""), cfg["analysis_max_chars"]),
             "time": _normalize_scalar_string(article.get("published_at"))
             or _normalize_scalar_string(article.get("date")),
-            "provider": "auto",
+            "provider": provider,
             "mode": "web",
             "speed": "fast",
         },
@@ -654,18 +681,21 @@ def analyze_single_article(config, article):
     cfg = get_analysis_config(config)
     article_id = build_article_id(article)
     cache_path = _article_cache_path(config, article_id)
+    force_provider = _normalize_analysis_force_provider(cfg.get("analysis_force_provider"))
+    remote_only = force_provider == "yuanbao"
+    local_only = force_provider == "ollama"
+    cached_success = _load_cached_analysis(cache_path) if cache_path.exists() else None
 
     if not cfg.get("analysis_enabled"):
         return {"status": "skipped", "reason": "analysis_disabled", "article_id": article_id}
 
-    if cfg.get("analysis_skip_if_exists") and cache_path.exists():
-        cached = _load_cached_analysis(cache_path)
-        if _is_valid_cached_single_analysis(cached):
-            return cached
+    if not force_provider and cfg.get("analysis_skip_if_exists") and cache_path.exists():
+        if _is_valid_cached_single_analysis(cached_success):
+            return cached_success
 
     result = None
     remote_error = ""
-    if cfg.get("analysis_news_interpret_url"):
+    if not local_only and cfg.get("analysis_news_interpret_url"):
         try:
             remote_result = _call_news_interpret(config, article)
             normalized = _normalize_remote_summary_analysis(remote_result, article)
@@ -673,10 +703,31 @@ def analyze_single_article(config, article):
                 result = normalized
             else:
                 remote_error = _normalize_scalar_string(normalized.get("reason")) or "empty_summary"
+                if remote_only:
+                    normalized["reason"] = remote_error
+                    result = normalized
         except requests.Timeout:
             remote_error = "news_interpret_timeout"
         except Exception as exc:
             remote_error = f"news_interpret_failed:{type(exc).__name__}:{exc}"
+
+    if remote_only and result is None:
+        result = {
+            "status": "skipped",
+            "reason": remote_error or "news_interpret_unavailable",
+            "article_id": article_id,
+            "account": article.get("account", ""),
+            "title": article.get("title", ""),
+            "url": article.get("url", ""),
+            "published_at": article.get("published_at", ""),
+            "date": article.get("date", ""),
+            "summary": "",
+            "topic": "",
+            "core_points": [],
+            "audience": "",
+            "risks": [],
+            "source": "yuanbao",
+        }
 
     if result is None:
         result = _analyze_single_article_with_local_llm(config, article, article_id)
@@ -685,7 +736,15 @@ def analyze_single_article(config, article):
             if not result.get("reason"):
                 result["reason"] = remote_error
 
-    if cfg.get("analysis_save_json", True) or cfg.get("analysis_save_markdown", True):
+    preserve_existing_success_cache = _should_preserve_existing_success_cache(
+        force_provider,
+        cached_success,
+        result,
+    )
+    if (
+        (cfg.get("analysis_save_json", True) or cfg.get("analysis_save_markdown", True))
+        and not preserve_existing_success_cache
+    ):
         persist_single_analysis_outputs(config, result)
 
     return result
@@ -788,16 +847,20 @@ def _render_analysis_item_html(item: dict) -> str:
         title_html = html_escape(title)
 
     action_status = ""
-    if safe_url:
+    action_buttons = []
+    for spec in _reanalyze_provider_specs():
         button_attrs = [
             'type="button"',
             'class="reanalyze-button"',
             f'data-article-id="{html_escape(article_id)}"',
-            f'data-url="{html_escape(safe_url)}"',
+            f'data-provider="{html_escape(spec["provider"])}"',
         ]
-    else:
-        button_attrs = ['type="button"', 'class="reanalyze-button"', "disabled"]
-        action_status = "缺少原文链接，无法重解读"
+        if safe_url:
+            button_attrs.append(f'data-url="{html_escape(safe_url)}"')
+        else:
+            button_attrs.append("disabled")
+            action_status = "缺少原文链接，无法重解读"
+        action_buttons.append(f'<button {" ".join(button_attrs)}>{html_escape(spec["label"])}</button>')
 
     parts = [
         '<div class="item">',
@@ -805,7 +868,7 @@ def _render_analysis_item_html(item: dict) -> str:
         f'<div class="meta">{html_escape(date_text)}</div>' if date_text else '<div class="meta"></div>',
         (
             '<div class="actions">'
-            f'<button {" ".join(button_attrs)}>重新解读</button>'
+            f'{"".join(action_buttons)}'
             f'<span class="reanalyze-status">{html_escape(action_status)}</span>'
             "</div>"
         ),
@@ -1041,9 +1104,19 @@ def _render_page_start(title: str):
 
 def _render_reanalyze_script_html(config):
     reanalyze_api_url = _resolve_reanalyze_api_url(config)
+    provider_messages = {
+        spec["provider"]: {
+            "label": spec["label"],
+            "pending": f'{spec["label"]}中...',
+            "success": f'{spec["label"]}成功，正在刷新...',
+            "error": f'{spec["label"]}失败，请稍后重试',
+        }
+        for spec in _reanalyze_provider_specs()
+    }
     return [
         "<script>",
         f"const REANALYZE_API_URL = {json.dumps(reanalyze_api_url, ensure_ascii=False)};",
+        f"const REANALYZE_PROVIDER_MESSAGES = {json.dumps(provider_messages, ensure_ascii=False)};",
         "function setReanalyzeStatus(button, text, state) {",
         '  const status = button.parentElement ? button.parentElement.querySelector(".reanalyze-status") : null;',
         "  if (!status) return;",
@@ -1053,34 +1126,56 @@ def _render_reanalyze_script_html(config):
         "    status.classList.add(state);",
         "  }",
         "}",
+        "function getRelatedReanalyzeButtons(button) {",
+        '  const articleId = button.getAttribute("data-article-id") || "";',
+        '  return Array.from(document.querySelectorAll(".reanalyze-button")).filter((candidate) => {',
+        '    return (candidate.getAttribute("data-article-id") || "") === articleId;',
+        "  });",
+        "}",
+        "function setReanalyzeBusyState(button, busy) {",
+        "  const relatedButtons = getRelatedReanalyzeButtons(button);",
+        "  relatedButtons.forEach((candidate) => {",
+        "    candidate.disabled = busy;",
+        '    candidate.classList.toggle("is-busy", busy);',
+        "  });",
+        "}",
         'document.querySelectorAll(".reanalyze-button").forEach((button) => {',
         "  if (button.disabled) return;",
         '  button.addEventListener("click", async () => {',
         '    const articleId = button.getAttribute("data-article-id") || "";',
         '    const url = button.getAttribute("data-url") || "";',
+        '    const provider = button.getAttribute("data-provider") || "";',
+        "    const providerMessages = REANALYZE_PROVIDER_MESSAGES[provider] || {",
+        '      label: "指定解读",',
+        '      pending: "指定解读中...",',
+        '      success: "指定解读成功，正在刷新...",',
+        '      error: "指定解读失败，请稍后重试",',
+        "    };",
         "    if (!url) {",
         '      setReanalyzeStatus(button, "缺少原文链接，无法重解读");',
         "      return;",
         "    }",
-        "    button.disabled = true;",
-        '    button.classList.add("is-busy");',
-        '    setReanalyzeStatus(button, "重新解读中...");',
+        "    if (!provider) {",
+        '      setReanalyzeStatus(button, "缺少 provider，无法重解读", "is-error");',
+        "      return;",
+        "    }",
+        "    setReanalyzeBusyState(button, true);",
+        "    setReanalyzeStatus(button, providerMessages.pending);",
         "    try {",
         "      const response = await fetch(REANALYZE_API_URL, {",
         '        method: "POST",',
         '        headers: {"Content-Type": "application/json"},',
-        "        body: JSON.stringify({article_id: articleId, url}),",
+        "        body: JSON.stringify({article_id: articleId, url, provider, provider_label: providerMessages.label, provider_action_text: providerMessages.pending}),",
         "      });",
         "      const payload = await response.json();",
         "      if (!response.ok || payload.status !== 'ok') {",
         "        throw new Error('reanalyze_failed');",
         "      }",
-        '      setReanalyzeStatus(button, "重新解读成功，正在刷新...", "is-success");',
+        '      setReanalyzeStatus(button, providerMessages.success, "is-success");',
         "      window.setTimeout(() => window.location.reload(), 800);",
         "    } catch (error) {",
-        '      setReanalyzeStatus(button, "重新解读失败，请稍后重试", "is-error");',
-        "      button.disabled = false;",
-        '      button.classList.remove("is-busy");',
+        '      setReanalyzeStatus(button, providerMessages.error, "is-error");',
+        "      setReanalyzeBusyState(button, false);",
         "    }",
         "  });",
         "});",

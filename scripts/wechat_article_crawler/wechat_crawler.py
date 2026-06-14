@@ -104,6 +104,11 @@ def _copy_config_with_forced_reanalyze(config):
     return copied
 
 
+def _normalize_reanalyze_provider(value):
+    text = str(value or "").strip().lower()
+    return text if text in ("yuanbao", "ollama") else ""
+
+
 def _normalize_effective_account_name(value):
     text = str(value or "").strip()
     if not text:
@@ -1257,13 +1262,35 @@ def _attach_single_article_analysis(config, fetched, refresh_index: bool = True,
         },
     )
     metadata_changed = False
+    preserve_existing_success_cache = False
     if isinstance(analysis, dict) and analysis.get("article_id"):
         analysis, metadata_changed = _merge_fetched_fields_into_analysis(analysis, fetched)
+        if force_reanalyze:
+            cached_before = _load_cached_analysis_by_article_id(
+                effective_config,
+                analysis.get("article_id"),
+            )
+            should_preserve = getattr(
+                _article_analysis_module,
+                "_should_preserve_existing_success_cache",
+                None,
+            )
+            preserve_existing_success_cache = bool(
+                callable(should_preserve)
+                and should_preserve(
+                    cfg.get("analysis_force_provider"),
+                    cached_before,
+                    analysis,
+                )
+            )
         if (
-            metadata_changed
-            or analysis.get("status") != "ok"
-            or _article_analysis_module is None
-            or analyze_single_article is not _article_analysis_module.analyze_single_article
+            not preserve_existing_success_cache
+            and (
+                metadata_changed
+                or analysis.get("status") != "ok"
+                or _article_analysis_module is None
+                or analyze_single_article is not _article_analysis_module.analyze_single_article
+            )
         ):
             persist_single_analysis_outputs(effective_config, analysis)
     if refresh_index and isinstance(analysis, dict) and analysis.get("article_id"):
@@ -1275,6 +1302,7 @@ def run_reanalyze_from_url(
     article_url,
     account_name=None,
     article_id=None,
+    provider=None,
     save_markdown=False,
     output_json_path=None,
     serverchan_sendkey=None,
@@ -1284,6 +1312,13 @@ def run_reanalyze_from_url(
     if not _is_allowed_reanalyze_url(article_url):
         raise ValueError("invalid_url")
     config = _copy_config_with_forced_reanalyze(config)
+    normalized_provider = _normalize_reanalyze_provider(provider)
+    if provider is not None and not normalized_provider:
+        raise ValueError("invalid_provider")
+    if normalized_provider:
+        config["analysis_force_provider"] = normalized_provider
+        if normalized_provider == "ollama":
+            config["analysis_news_interpret_url"] = ""
     resolved_account = _resolve_reanalyze_account_name(
         config,
         article_id=article_id,
@@ -1336,19 +1371,27 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
         return {"status": "error", "article_id": article_id, "reason": "missing_url"}
     if not _is_allowed_reanalyze_url(url):
         return {"status": "error", "article_id": article_id, "reason": "invalid_url"}
+    provider = _normalize_reanalyze_provider(payload.get("provider"))
+    if not provider:
+        return {"status": "error", "article_id": article_id, "reason": "invalid_provider"}
     account_name = str(payload.get("account") or "").strip()
     try:
         result = run_reanalyze_from_url(
             url,
             account_name=account_name,
             article_id=article_id,
+            provider=provider,
             save_markdown=False,
             push=False,
             config=config,
         )
     except Exception as exc:
         explicit_reason = str(exc or "").strip()
-        if explicit_reason in ("wechat_auth_required", "wechat_security_verification_required"):
+        if explicit_reason in (
+            "wechat_auth_required",
+            "wechat_security_verification_required",
+            "invalid_provider",
+        ):
             return {"status": "error", "article_id": article_id, "reason": explicit_reason}
         return {"status": "error", "article_id": article_id, "reason": f"reanalyze_failed:{type(exc).__name__}:{exc}"}
     analysis = result.get("analysis") if isinstance(result, dict) else None
