@@ -1286,6 +1286,85 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_local_llm_accepts_alternate_summary_schema(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: json.dumps(
+            {
+                "title": "Vibe Coding与灵光平台：普通人如何用AI快速打造实用工具",
+                "content": "这是一段有效总结。",
+                "key_points": [
+                    "要点一",
+                    "要点二",
+                ],
+                "trend_impact": "软件开发门槛继续下降。",
+            },
+            ensure_ascii=False,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "差评X.PIN",
+                        "title": "逛完灵光的创作者派对，我发现软件正在被分成两个世界。",
+                        "published_at": "2026-04-21 00:00",
+                        "url": "https://mp.weixin.qq.com/s/4QN1_IpDXTQybdpasTGbww",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertIn("这是一段有效总结。", result["summary"])
+                self.assertIn("软件开发门槛继续下降。", result["summary"])
+                self.assertEqual(result["core_points"], ["要点一", "要点二"])
+                self.assertEqual(result["audience"], "")
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_local_llm_accepts_trend_style_schema(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: json.dumps(
+            {
+                "core_trend": "Vibe coding 让普通人也能快速开发工具。",
+                "application_types": [
+                    "社交型应用",
+                    "实用型工具",
+                ],
+                "platform_response": "平台推出创作者激励计划。",
+                "key_impact": "软件开发门槛继续下降。",
+            },
+            ensure_ascii=False,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "差评X.PIN",
+                        "title": "逛完灵光的创作者派对，我发现软件正在被分成两个世界。",
+                        "published_at": "2026-04-21 00:00",
+                        "url": "https://mp.weixin.qq.com/s/4QN1_IpDXTQybdpasTGbww",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertIn("Vibe coding", result["summary"])
+                self.assertIn("平台推出创作者激励计划。", result["summary"])
+                self.assertEqual(result["core_points"], ["社交型应用", "实用型工具"])
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_normalizes_string_list_fields(self):
         def fake_post(url, json=None, timeout=0):
             class Resp:

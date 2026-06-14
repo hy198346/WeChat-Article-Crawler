@@ -290,6 +290,15 @@ def _normalize_summary_text(value):
     return str(value).strip()
 
 
+def _normalize_summary_candidates(*values):
+    parts = []
+    for value in values:
+        text = _normalize_summary_text(value)
+        if text and text not in parts:
+            parts.append(text)
+    return "\n".join(parts)
+
+
 def _has_meaningful_single_analysis_content(
     *, summary="", topic="", core_points=None, audience="", risks=None
 ):
@@ -506,18 +515,30 @@ def persist_batch_analysis_outputs(config, batch_analysis):
 
 def _parse_single_analysis(content: str):
     data = json.loads(content)
-    summary = _normalize_summary_text(data.get("summary"))
+    summary = _normalize_summary_candidates(
+        data.get("summary"),
+        data.get("content"),
+        data.get("analysis"),
+        data.get("text"),
+        data.get("result"),
+        data.get("trend_impact"),
+        data.get("key_impact"),
+        data.get("core_trend"),
+        data.get("platform_response"),
+    )
+    core_points = _normalize_list(
+        data.get("core_points") or data.get("key_points") or data.get("application_types")
+    )
     if summary:
         return {
             "status": "ok",
             "summary": summary,
             "topic": "",
-            "core_points": [],
+            "core_points": core_points,
             "audience": "",
             "risks": [],
         }
     topic = _normalize_scalar_string(data.get("topic"))
-    core_points = _normalize_list(data.get("core_points"))
     audience = _normalize_scalar_string(data.get("audience"))
     risks = _normalize_list(data.get("risks"))
     if not _has_meaningful_single_analysis_content(
