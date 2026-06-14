@@ -109,6 +109,9 @@ def _normalize_reanalyze_provider(value):
     return text if text in ("yuanbao", "ollama") else ""
 
 
+MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS = 90
+
+
 def _normalize_effective_account_name(value):
     text = str(value or "").strip()
     if not text:
@@ -1319,6 +1322,12 @@ def run_reanalyze_from_url(
         config["analysis_force_provider"] = normalized_provider
         if normalized_provider == "ollama":
             config["analysis_news_interpret_url"] = ""
+            try:
+                timeout_seconds = int(config.get("analysis_timeout_seconds") or 0)
+            except (TypeError, ValueError):
+                timeout_seconds = 0
+            if timeout_seconds < MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS:
+                config["analysis_timeout_seconds"] = MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS
     resolved_account = _resolve_reanalyze_account_name(
         config,
         article_id=article_id,

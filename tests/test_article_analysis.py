@@ -3463,6 +3463,62 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             wechat_crawler.push_article_to_serverchan = old_push
             wechat_crawler._attach_single_article_analysis = old_attach
 
+    def test_run_reanalyze_from_url_raises_ollama_timeout_floor_for_manual_reanalyze(self):
+        captured = []
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_attach = wechat_crawler._attach_single_article_analysis
+        try:
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-14",
+                "published_at": "2026-06-14 10:00",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = lambda *args, **kwargs: self.fail(
+                "push=False 时不应推送"
+            )
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                captured.append(
+                    {
+                        "config": dict(config or {}),
+                        "force_reanalyze": force_reanalyze,
+                    }
+                )
+                return {
+                    "status": "ok",
+                    "article_id": "aid-timeout-floor",
+                    "source": "local",
+                }
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+
+            payload = wechat_crawler.run_reanalyze_from_url(
+                "https://mp.weixin.qq.com/s/provider-ollama-timeout",
+                article_id="aid-timeout-floor",
+                provider="ollama",
+                push=False,
+                config={
+                    "analysis_enabled": True,
+                    "analysis_timeout_seconds": 30,
+                    "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                },
+            )
+
+            self.assertEqual(payload["analysis"]["source"], "local")
+            self.assertTrue(captured[-1]["force_reanalyze"])
+            self.assertEqual(captured[-1]["config"]["analysis_force_provider"], "ollama")
+            self.assertEqual(captured[-1]["config"]["analysis_news_interpret_url"], "")
+            self.assertGreaterEqual(captured[-1]["config"]["analysis_timeout_seconds"], 90)
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            wechat_crawler._attach_single_article_analysis = old_attach
+
     def test_handle_reanalyze_api_request_passes_supported_provider_to_runner(self):
         calls = []
 
