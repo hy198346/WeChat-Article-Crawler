@@ -1,4 +1,6 @@
+import contextlib
 import http.client
+import io
 import json
 import os
 import re
@@ -1285,6 +1287,134 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertEqual(result["url"], "https://mp.weixin.qq.com/s/empty-analysis")
         finally:
             article_analysis.call_ollama_chat = old_local
+
+    def test_summarize_ollama_schema_drift_includes_article_and_schema_context(self):
+        summary = article_analysis._summarize_ollama_schema_drift(
+            json.dumps(
+                {
+                    "headline": "这是一段当前 schema 无法识别的有效总结",
+                    "content": "模型给出了正文式总结",
+                    "application_types": ["工具", "平台"],
+                },
+                ensure_ascii=False,
+            ),
+            {
+                "article_id": "schema-drift-article-001",
+                "account": "测试号",
+                "title": "Schema Drift 标题",
+            },
+        )
+
+        self.assertIn("[ollama-schema-drift]", summary)
+        self.assertIn('"schema-drift-article-001"', summary)
+        self.assertIn('"Schema Drift 标题"', summary)
+        self.assertIn('"headline"', summary)
+        self.assertIn('"content"', summary)
+        self.assertIn('"application_types"', summary)
+        self.assertIn("provider=ollama", summary)
+        self.assertIn('reason="empty_analysis"', summary)
+
+    def test_summarize_ollama_schema_drift_excludes_empty_dict_string_and_list_candidates(self):
+        summary = article_analysis._summarize_ollama_schema_drift(
+            json.dumps(
+                {
+                    "content": {},
+                    "summary": "   ",
+                    "key_points": [],
+                    "application_types": {},
+                },
+                ensure_ascii=False,
+            ),
+            {
+                "article_id": "schema-drift-empty-candidates-001",
+                "account": "测试号",
+                "title": "空候选字段标题",
+            },
+        )
+
+        self.assertIn('"content"', summary)
+        self.assertIn('"summary"', summary)
+        self.assertIn('"key_points"', summary)
+        self.assertIn('"application_types"', summary)
+        self.assertIn("non_empty_candidates=[]", summary)
+
+    def test_analyze_single_article_local_llm_logs_schema_drift_for_empty_analysis(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: json.dumps(
+            {
+                "headline": "这是一段当前 schema 无法识别的有效总结",
+                "bullet_points": ["要点一", "要点二"],
+                "key_points": [],
+            },
+            ensure_ascii=False,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                article = {
+                    "article_id": "schema-drift-article-001",
+                    "account": "测试号",
+                    "title": "Schema Drift 标题",
+                    "published_at": "2026-06-14 09:30",
+                    "url": "https://mp.weixin.qq.com/s/schema-drift-empty-analysis",
+                    "markdown": "# 正文",
+                }
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    result = article_analysis.analyze_single_article(
+                        {
+                            "analysis_enabled": True,
+                            "analysis_output_dir": d,
+                            "analysis_news_interpret_url": "",
+                        },
+                        article,
+                    )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "empty_analysis")
+                rendered = stdout.getvalue()
+                self.assertIn("[ollama-schema-drift]", rendered)
+                self.assertIn("schema-drift-article-001", rendered)
+                self.assertIn("reason=\"empty_analysis\"", rendered)
+                self.assertIn("key_points", rendered)
+                self.assertTrue(
+                    "Schema Drift 标题" in rendered or "raw_preview=" in rendered,
+                    rendered,
+                )
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_local_llm_ignores_schema_drift_logger_failures(self):
+        old_local = article_analysis.call_ollama_chat
+        old_log = article_analysis._log_ollama_schema_drift
+        article_analysis.call_ollama_chat = lambda config, prompt: "{}"
+
+        def raise_log_error(_raw_content, _article, reason="empty_analysis"):
+            raise RuntimeError("log transport down")
+
+        article_analysis._log_ollama_schema_drift = raise_log_error
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "article_id": "schema-drift-logger-fail-001",
+                        "account": "测试号",
+                        "title": "Logger Fail 标题",
+                        "published_at": "2026-06-14 09:45",
+                        "url": "https://mp.weixin.qq.com/s/schema-drift-logger-fail",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "empty_analysis")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+            article_analysis._log_ollama_schema_drift = old_log
 
     def test_analyze_single_article_local_llm_accepts_alternate_summary_schema(self):
         old_local = article_analysis.call_ollama_chat

@@ -29,6 +29,21 @@ DEFAULT_ANALYSIS_CONFIG = {
     "analysis_skip_if_exists": True,
 }
 
+OLLAMA_SCHEMA_DRIFT_CANDIDATE_FIELDS = (
+    "summary",
+    "content",
+    "analysis",
+    "text",
+    "result",
+    "key_points",
+    "core_points",
+    "trend_impact",
+    "key_impact",
+    "core_trend",
+    "platform_response",
+    "application_types",
+)
+
 
 def _resolve_analysis_base_url(explicit_value):
     explicit = str(explicit_value or "").strip()
@@ -311,6 +326,70 @@ def _has_meaningful_single_analysis_content(
             bool(_normalize_list(risks)),
         )
     )
+
+
+def _has_meaningful_schema_drift_candidate(value, *, list_like: bool = False) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        if not value:
+            return False
+        return any(
+            _has_meaningful_schema_drift_candidate(item, list_like=list_like)
+            for item in value.values()
+        )
+    if list_like:
+        return bool(_normalize_list(value))
+    return bool(_normalize_summary_text(value))
+
+
+def _compress_preview_text(value, limit: int = 400) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, int(limit or 400))] + "..."
+
+
+def _summarize_ollama_schema_drift(raw_content: str, article, reason: str = "empty_analysis") -> str:
+    try:
+        data = json.loads(raw_content)
+    except (TypeError, ValueError):
+        data = None
+    top_level_keys = []
+    non_empty_candidates = []
+    if isinstance(data, dict):
+        top_level_keys = [str(key) for key in data.keys()]
+        for field in OLLAMA_SCHEMA_DRIFT_CANDIDATE_FIELDS:
+            value = data.get(field)
+            has_value = _has_meaningful_schema_drift_candidate(
+                value,
+                list_like=field in ("key_points", "core_points", "application_types"),
+            )
+            if has_value:
+                non_empty_candidates.append(field)
+    article_id = build_article_id(article)
+    return " ".join(
+        [
+            "[ollama-schema-drift]",
+            "provider=ollama",
+            f"account={json.dumps(_normalize_scalar_string(article.get('account')), ensure_ascii=False)}",
+            f"article_id={json.dumps(article_id, ensure_ascii=False)}",
+            f"title={json.dumps(_normalize_scalar_string(article.get('title')), ensure_ascii=False)}",
+            f"reason={json.dumps(_normalize_scalar_string(reason) or 'empty_analysis', ensure_ascii=False)}",
+            f"top_level_keys={json.dumps(top_level_keys, ensure_ascii=False)}",
+            f"non_empty_candidates={json.dumps(non_empty_candidates, ensure_ascii=False)}",
+            f"raw_preview={json.dumps(_compress_preview_text(raw_content), ensure_ascii=False)}",
+        ]
+    )
+
+
+def _log_ollama_schema_drift(raw_content: str, article, reason: str = "empty_analysis"):
+    try:
+        summary = _summarize_ollama_schema_drift(raw_content, article, reason=reason)
+        if summary:
+            print(f"{_now_text()} {summary}")
+    except Exception:
+        return
 
 
 def _render_summary_html(summary: str) -> str:
@@ -619,7 +698,13 @@ def _analyze_single_article_with_local_llm(config, article, article_id: str):
     cfg = get_analysis_config(config)
     prompt = _build_single_article_prompt(article, cfg)
     try:
-        result = _parse_single_analysis(call_ollama_chat(config, prompt))
+        raw_content = call_ollama_chat(config, prompt)
+        result = _parse_single_analysis(raw_content)
+        if result.get("status") == "skipped" and result.get("reason") == "empty_analysis":
+            try:
+                _log_ollama_schema_drift(raw_content, article, reason="empty_analysis")
+            except Exception:
+                pass
     except requests.Timeout:
         result = {"status": "skipped", "reason": "ollama_timeout", "article_id": article_id}
     except Exception as exc:
