@@ -255,6 +255,18 @@ output/article_analysis/index.html
 4. 如果页面通过公网域名访问，确认该域名已把 `analysis_reanalyze_path` 代理到本地重解读服务
 5. 打开聚合页并点击“重新解读”验证链路
 
+发布或修改重解读相关链路后，若页面入口通过 `analysis-static` 对外提供，需同时重启这两个 `launchd` 服务，避免公网入口继续跑旧代码：
+
+```bash
+bin/restart_analysis_services.sh
+```
+
+说明：
+
+- 默认顺序重启 `com.wechat.articlecrawler.analysis-static`
+- 再重启 `com.wechat.articlecrawler.reanalyze-api`
+- 如需切换 `launchd` domain，可设置 `WECHAT_LAUNCHD_DOMAIN`，例如 `system`
+
 ## 自动运行（每天 8/12/16/20/24 点）
 
 本项目提供 Windows 计划任务安装脚本，会在每天以下时间自动运行：
