@@ -685,7 +685,7 @@ def _call_news_interpret(config, article):
             "time": _normalize_scalar_string(article.get("published_at"))
             or _normalize_scalar_string(article.get("date")),
             "provider": provider,
-            "mode": "web",
+            "mode": "wechat_summary",
             "speed": "fast",
         },
         timeout=cfg["analysis_timeout_seconds"],

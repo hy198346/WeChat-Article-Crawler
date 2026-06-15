@@ -888,6 +888,54 @@ class TestArticleAnalysis(unittest.TestCase):
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_news_interpret_uses_wechat_summary_mode(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"ok": True, "analysis": "公众号总结结果"}
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.requests.post = fake_post
+        article_analysis.call_ollama_chat = lambda config, prompt: self.fail("不应回退本地分析")
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "公众号总结标题",
+                        "published_at": "2026-06-15 12:30",
+                        "url": "https://mp.weixin.qq.com/s/wechat-summary-mode",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["summary"], "公众号总结结果")
+                self.assertEqual(
+                    calls[0][1]["mode"],
+                    "wechat_summary",
+                )
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_uses_news_interpret_env_fallback(self):
         calls = []
 
