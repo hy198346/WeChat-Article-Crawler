@@ -314,12 +314,39 @@ def _normalize_summary_candidates(*values):
     return "\n".join(parts)
 
 
+def _has_meaningful_summary_text(value) -> bool:
+    text = _normalize_summary_text(value)
+    if not text:
+        return False
+    placeholder_values = {
+        "",
+        "（无）",
+        "(无)",
+        "无",
+        "无外部证据",
+        "（无外部证据）",
+        "(无外部证据)",
+    }
+    for raw_line in text.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if line.startswith(("## ", "### ")):
+            continue
+        if line.startswith(("- ", "* ")):
+            line = line[2:].strip()
+        if not line or line in placeholder_values:
+            continue
+        return True
+    return False
+
+
 def _has_meaningful_single_analysis_content(
     *, summary="", topic="", core_points=None, audience="", risks=None
 ):
     return any(
         (
-            _normalize_summary_text(summary),
+            _has_meaningful_summary_text(summary),
             _normalize_scalar_string(topic),
             bool(_normalize_list(core_points)),
             _normalize_scalar_string(audience),
@@ -639,6 +666,9 @@ def _parse_single_analysis(content: str):
 
 def _normalize_remote_summary_analysis(result, article):
     summary = ""
+    remote_reason = ""
+    need_login = False
+    need_login_url = ""
     if isinstance(result, dict):
         summary = _normalize_summary_text(
             result.get("summary")
@@ -646,6 +676,11 @@ def _normalize_remote_summary_analysis(result, article):
             or result.get("content")
             or result.get("text")
             or result.get("result")
+        )
+        remote_reason = _normalize_scalar_string(result.get("error") or result.get("reason"))
+        need_login = bool(result.get("need_login")) or remote_reason == "need_login"
+        need_login_url = _normalize_scalar_string(
+            result.get("needLoginUrl") or result.get("need_login_url")
         )
     elif result is not None:
         summary = _normalize_summary_text(result)
@@ -663,11 +698,16 @@ def _normalize_remote_summary_analysis(result, article):
         "risks": [],
         "source": "yuanbao",
     }
-    if summary:
+    if need_login:
+        payload["need_login"] = True
+    if need_login_url:
+        payload["needLoginUrl"] = need_login_url
+    if _has_meaningful_summary_text(summary):
         payload["status"] = "ok"
     else:
+        payload["summary"] = ""
         payload["status"] = "skipped"
-        payload["reason"] = "empty_summary"
+        payload["reason"] = remote_reason or "empty_summary"
     return payload
 
 
@@ -911,7 +951,7 @@ def _now_text():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _render_analysis_item_html(item: dict) -> str:
+def _render_analysis_item_html(item: dict, config=None) -> str:
     article_id = _normalize_scalar_string(item.get("article_id"))
     title = _normalize_scalar_string(item.get("title")) or "(无标题)"
     url = _normalize_scalar_string(item.get("url"))
@@ -978,6 +1018,7 @@ def _render_analysis_item_html(item: dict) -> str:
             f'<span class="reanalyze-status">{html_escape(action_status)}</span>'
             "</div>"
         ),
+        _render_need_login_hint_html(config, item),
     ]
 
     if summary:
@@ -1109,6 +1150,7 @@ def _merge_index_items_for_same_url(previous: dict, current: dict):
         "date_text",
         "status",
         "reason",
+        "needLoginUrl",
         "summary",
         "topic",
         "audience",
@@ -1123,6 +1165,8 @@ def _merge_index_items_for_same_url(previous: dict, current: dict):
         if _normalize_list(merged.get(field)):
             continue
         merged[field] = _normalize_list(secondary.get(field)) or _normalize_list(primary.get(field))
+    if not merged.get("need_login"):
+        merged["need_login"] = bool(primary.get("need_login")) or bool(secondary.get("need_login"))
 
     return merged
 
@@ -1147,6 +1191,32 @@ def _resolve_reanalyze_api_url(config) -> str:
     if not path.startswith("/"):
         path = "/" + path
     return f"{base_url}{path}" if base_url else path
+
+
+def _resolve_news_origin(config) -> str:
+    cfg = get_analysis_config(config)
+    url = _normalize_scalar_string(cfg.get("analysis_news_interpret_url"))
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _resolve_need_login_asset_url(config, raw_url) -> str:
+    text = _normalize_scalar_string(raw_url)
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return text
+    base_url = _resolve_news_origin(config)
+    if not base_url:
+        return text
+    if text.startswith("/"):
+        return f"{base_url}{text}"
+    return f"{base_url}/{text.lstrip('/')}"
 
 
 def _analysis_page_style_lines():
@@ -1176,6 +1246,11 @@ def _analysis_page_style_lines():
         ".reanalyze-button.is-busy{opacity:0.75;cursor:progress;}",
         ".reanalyze-status.is-success{color:#1a7f37;}",
         ".reanalyze-status.is-error{color:#cf222e;}",
+        ".reanalyze-login-hint{margin-top:10px;}",
+        ".reanalyze-login-link{display:inline-block;margin-top:4px;font-size:12px;color:#0969da;text-decoration:none;}",
+        ".reanalyze-login-link:hover{text-decoration:underline;}",
+        ".reanalyze-login-image-wrap{margin-top:8px;}",
+        ".reanalyze-login-image{display:block;max-width:220px;width:100%;height:auto;border:1px solid #d0d7de;border-radius:10px;background:#fff;}",
         ".label{color:#666;font-size:12px;margin-top:6px;}",
         ".field{margin-top:6px;}",
         ".summary-inline{display:inline;}",
@@ -1208,8 +1283,36 @@ def _render_page_start(title: str):
     ]
 
 
+def _render_need_login_hint_html(config, item: dict) -> str:
+    reason = _normalize_scalar_string(item.get("reason"))
+    need_login = bool(item.get("need_login")) or reason == "need_login"
+    if not need_login:
+        return '<div class="reanalyze-login-hint"></div>'
+    need_login_url = _resolve_need_login_asset_url(
+        config, item.get("needLoginUrl") or item.get("need_login_url")
+    )
+    if not need_login_url:
+        return '<div class="reanalyze-login-hint"></div>'
+    safe_url = html_escape(need_login_url)
+    return (
+        '<div class="reanalyze-login-hint">'
+        '<div class="label">元宝登录二维码：</div>'
+        f'<a class="reanalyze-login-link" href="{safe_url}" target="_blank" rel="noopener noreferrer">打开登录二维码</a>'
+        '<div class="reanalyze-login-image-wrap">'
+        f'<img class="reanalyze-login-image" src="{safe_url}" alt="元宝登录二维码" loading="lazy" />'
+        "</div>"
+        "</div>"
+    )
+
+
 def _render_reanalyze_script_html(config):
     reanalyze_api_url = _resolve_reanalyze_api_url(config)
+    reanalyze_api_path = (
+        _normalize_scalar_string(get_analysis_config(config).get("analysis_reanalyze_path")) or "/api/reanalyze"
+    )
+    if not reanalyze_api_path.startswith("/"):
+        reanalyze_api_path = "/" + reanalyze_api_path
+    need_login_base_url = _resolve_news_origin(config)
     provider_messages = {
         spec["provider"]: {
             "label": spec["label"],
@@ -1222,7 +1325,29 @@ def _render_reanalyze_script_html(config):
     return [
         "<script>",
         f"const REANALYZE_API_URL = {json.dumps(reanalyze_api_url, ensure_ascii=False)};",
+        f"const REANALYZE_API_PATH = {json.dumps(reanalyze_api_path, ensure_ascii=False)};",
+        f"const NEED_LOGIN_BASE_URL = {json.dumps(need_login_base_url, ensure_ascii=False)};",
         f"const REANALYZE_PROVIDER_MESSAGES = {json.dumps(provider_messages, ensure_ascii=False)};",
+        "function resolveReanalyzeApiUrl() {",
+        "  const fallbackPath = REANALYZE_API_PATH || '/api/reanalyze';",
+        "  const configuredUrl = REANALYZE_API_URL || fallbackPath;",
+        "  try {",
+        "    const origin = String((window.location && window.location.origin) || '').trim();",
+        "    if (/^https?:\\/\\/(127\\.0\\.0\\.1|localhost)(:\\d+)?$/i.test(origin)) {",
+        "      return fallbackPath;",
+        "    }",
+        "  } catch (error) {}",
+        "  return configuredUrl;",
+        "}",
+        "function resolveNeedLoginUrl(needLoginUrl) {",
+        "  const text = String(needLoginUrl || '').trim();",
+        "  if (!text) return '';",
+        "  if (/^https?:\\/\\//i.test(text)) return text;",
+        "  const baseUrl = String(NEED_LOGIN_BASE_URL || '').trim();",
+        "  if (!baseUrl) return text;",
+        "  if (text.startsWith('/')) return `${baseUrl}${text}`;",
+        "  return `${baseUrl}/${text.replace(/^\\/+/, '')}`;",
+        "}",
         "function setReanalyzeStatus(button, text, state) {",
         '  const status = button.parentElement ? button.parentElement.querySelector(".reanalyze-status") : null;',
         "  if (!status) return;",
@@ -1231,6 +1356,35 @@ def _render_reanalyze_script_html(config):
         "  if (state) {",
         "    status.classList.add(state);",
         "  }",
+        "}",
+        "function setReanalyzeNeedLoginHint(button, needLoginUrl) {",
+        '  const item = button.closest(".item");',
+        "  if (!item) return;",
+        '  const hint = item.querySelector(".reanalyze-login-hint");',
+        "  if (!hint) return;",
+        "  hint.replaceChildren();",
+        "  const resolvedUrl = resolveNeedLoginUrl(needLoginUrl);",
+        "  if (!resolvedUrl) return;",
+        '  const label = document.createElement("div");',
+        '  label.className = "label";',
+        '  label.textContent = "元宝登录二维码：";',
+        '  const link = document.createElement("a");',
+        '  link.className = "reanalyze-login-link";',
+        "  link.href = resolvedUrl;",
+        '  link.target = "_blank";',
+        '  link.rel = "noopener noreferrer";',
+        '  link.textContent = "打开登录二维码";',
+        '  const wrap = document.createElement("div");',
+        '  wrap.className = "reanalyze-login-image-wrap";',
+        '  const image = document.createElement("img");',
+        '  image.className = "reanalyze-login-image";',
+        "  image.src = resolvedUrl;",
+        '  image.alt = "元宝登录二维码";',
+        '  image.loading = "lazy";',
+        "  wrap.appendChild(image);",
+        "  hint.appendChild(label);",
+        "  hint.appendChild(link);",
+        "  hint.appendChild(wrap);",
         "}",
         "function getRelatedReanalyzeButtons(button) {",
         '  const articleId = button.getAttribute("data-article-id") || "";',
@@ -1267,13 +1421,20 @@ def _render_reanalyze_script_html(config):
         "    }",
         "    setReanalyzeBusyState(button, true);",
         "    setReanalyzeStatus(button, providerMessages.pending);",
+        "    setReanalyzeNeedLoginHint(button, '');",
         "    try {",
-        "      const response = await fetch(REANALYZE_API_URL, {",
+        "      const response = await fetch(resolveReanalyzeApiUrl(), {",
         '        method: "POST",',
         '        headers: {"Content-Type": "application/json"},',
         "        body: JSON.stringify({article_id: articleId, url, provider, provider_label: providerMessages.label, provider_action_text: providerMessages.pending}),",
         "      });",
         "      const payload = await response.json();",
+        "      if (payload && (payload.reason === 'need_login' || payload.need_login)) {",
+        "        setReanalyzeNeedLoginHint(button, payload.needLoginUrl || payload.need_login_url || '');",
+        '        setReanalyzeStatus(button, "需要扫码登录元宝", "is-error");',
+        "        setReanalyzeBusyState(button, false);",
+        "        return;",
+        "      }",
         "      if (!response.ok || payload.status !== 'ok') {",
         "        throw new Error('reanalyze_failed');",
         "      }",
@@ -1319,7 +1480,7 @@ def _render_account_page_html(
             '<a class="back-link" href="../index.html">返回目录</a>',
             f"<h1>{html_escape(account)}</h1>",
             f'<div class="subtitle">{html_escape(subtitle)}</div>',
-            _render_analysis_item_html(latest_item),
+            _render_analysis_item_html(latest_item, config=config),
         ]
     )
     history = sorted_items[1:]
@@ -1328,7 +1489,7 @@ def _render_account_page_html(
         for item in history:
             page_parts.append("<details>")
             page_parts.append(f"<summary>{html_escape(_render_history_summary_label(item))}</summary>")
-            page_parts.append(_render_analysis_item_html(item))
+            page_parts.append(_render_analysis_item_html(item, config=config))
             page_parts.append("</details>")
     page_parts.extend(_render_reanalyze_script_html(config))
     page_parts.extend(["</body>", "</html>"])
@@ -1403,6 +1564,11 @@ def build_analysis_index_html(config):
             "date_text": date_text,
             "status": _normalize_scalar_string(data.get("status")) or "unknown",
             "reason": _normalize_scalar_string(data.get("reason")),
+            "need_login": bool(data.get("need_login"))
+            or _normalize_scalar_string(data.get("reason")) == "need_login",
+            "needLoginUrl": _normalize_scalar_string(
+                data.get("needLoginUrl") or data.get("need_login_url")
+            ),
             "summary": _normalize_summary_text(data.get("summary")),
             "topic": _normalize_scalar_string(data.get("topic")),
             "audience": _normalize_scalar_string(data.get("audience")),

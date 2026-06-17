@@ -1014,6 +1014,60 @@ class TestArticleAnalysis(unittest.TestCase):
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_force_yuanbao_preserves_upstream_need_login_reason(self):
+        def fake_post(url, json=None, timeout=0, headers=None):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "ok": False,
+                        "error": "need_login",
+                        "need_login": True,
+                        "needLoginUrl": "/api/telegraph/interpret/file?jobId=test&name=need_login.png",
+                        "analysis": "",
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.requests.post = fake_post
+        article_analysis.call_ollama_chat = lambda config, prompt: self.fail(
+            "强制元宝模式遇到 need_login 不应回退到本地模型"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_force_provider": "yuanbao",
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "强制元宝需登录",
+                        "published_at": "2026-06-16 12:20",
+                        "url": "https://mp.weixin.qq.com/s/force-yuanbao-need-login",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "need_login")
+                self.assertTrue(result["need_login"])
+                self.assertEqual(
+                    result["needLoginUrl"],
+                    "/api/telegraph/interpret/file?jobId=test&name=need_login.png",
+                )
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_force_yuanbao_success_uses_remote_only(self):
         calls = []
 
@@ -1061,6 +1115,67 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertEqual(
                     calls[0][0], "https://news.example.com/api/telegraph/interpret"
                 )
+        finally:
+            article_analysis.requests.post = old_post
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_force_yuanbao_skips_placeholder_empty_summary(self):
+        def fake_post(url, json=None, timeout=0, headers=None):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "ok": True,
+                        "analysis": (
+                            "## 结论\n"
+                            "- （无）\n"
+                            "## 影响\n"
+                            "- （无）\n"
+                            "## A股股票（高置信）\n"
+                            "### 利好\n"
+                            "- （无）\n"
+                            "### 利空\n"
+                            "- （无）\n"
+                            "## 风险与不确定性\n"
+                            "- （无）\n"
+                            "## 证据\n"
+                            "- 无外部证据"
+                        ),
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.requests.post = fake_post
+        article_analysis.call_ollama_chat = lambda config, prompt: self.fail(
+            "强制元宝命中占位空总结时不应回退到本地模型"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_force_provider": "yuanbao",
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "强制元宝占位空总结",
+                        "published_at": "2026-06-17 08:00",
+                        "url": "https://mp.weixin.qq.com/s/force-yuanbao-placeholder-empty-summary",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "empty_summary")
+                self.assertEqual(result["source"], "yuanbao")
         finally:
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
@@ -1848,8 +1963,10 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
         last_close = html.rfind("</details>", 0, pos)
         return last_details > last_close
 
-    def _build_and_read_index_html(self, output_root: str) -> str:
+    def _build_and_read_index_html(self, output_root: str, config=None) -> str:
         cfg = {"analysis_enabled": True, "analysis_output_dir": output_root}
+        if isinstance(config, dict):
+            cfg.update(config)
         func = getattr(article_analysis, "build_analysis_index_html", None)
         if callable(func):
             try:
@@ -2981,7 +3098,7 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
 
             self.assertIn('const REANALYZE_API_URL = "/api/reanalyze";', html)
             self.assertNotIn("http://127.0.0.1:8766/api/reanalyze", html)
-            self.assertIn("fetch(REANALYZE_API_URL", html)
+            self.assertIn("fetch(resolveReanalyzeApiUrl()", html)
             self.assertIn('data-provider="yuanbao"', html)
             self.assertIn('data-provider="ollama"', html)
             self.assertRegex(html, r'body\s*:\s*.*provider')
@@ -3022,7 +3139,81 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn("本地模型解读失败，请稍后重试", html)
             self.assertNotIn("重新解读失败，请稍后重试", html)
             self.assertNotIn("重新解读失败：${message}", html)
-            self.assertNotIn("payload.reason", html)
+            self.assertIn("payload.reason === 'need_login'", html)
+            self.assertIn("payload.need_login", html)
+
+    def test_build_analysis_index_html_handles_need_login_reanalyze_reason_explicitly(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "entry",
+                        "account": "号A",
+                        "title": "需要登录文章",
+                        "url": "https://mp.weixin.qq.com/s/reanalyze-entry",
+                        "published_at": "2026-06-12 08:00",
+                        "topic": "主题",
+                        "core_points": ["观点"],
+                        "audience": "读者",
+                        "risks": ["风险"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
+
+            self.assertIn("payload.reason === 'need_login'", html)
+            self.assertIn("payload.need_login", html)
+            self.assertIn("payload.needLoginUrl", html)
+            self.assertIn("需要扫码登录元宝", html)
+            self.assertIn("setReanalyzeNeedLoginHint", html)
+
+    def test_build_analysis_index_html_renders_need_login_qr_link_with_news_origin(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "skipped",
+                        "reason": "need_login",
+                        "need_login": True,
+                        "needLoginUrl": "/api/telegraph/interpret/file?jobId=test-job&name=need_login.png",
+                        "article_id": "entry",
+                        "account": "号A",
+                        "title": "需要扫码文章",
+                        "url": "https://mp.weixin.qq.com/s/reanalyze-entry",
+                        "published_at": "2026-06-12 08:00",
+                        "topic": "解读失败，可重试",
+                        "core_points": [],
+                        "audience": "",
+                        "risks": ["need_login"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(
+                d,
+                config={
+                    "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret"
+                },
+            )
+            _, html = self._find_account_page(d, "号A")
+
+            self.assertIn("元宝登录二维码", html)
+            self.assertIn("打开登录二维码", html)
+            self.assertIn(
+                "https://news.example.com/api/telegraph/interpret/file?jobId=test-job&amp;name=need_login.png",
+                html,
+            )
 
     def test_build_analysis_index_html_links_same_article_provider_buttons_busy_and_restore_contract(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3102,6 +3293,41 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn("这里是第二段总结。", html)
             self.assertIn('<p class="summary-paragraph">这里是第一段总结。</p>', html)
             self.assertNotIn("旧主题", html)
+
+    def test_build_analysis_index_html_falls_back_to_same_origin_reanalyze_for_local_static_page(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "entry",
+                        "account": "号A",
+                        "title": "可重解读文章",
+                        "url": "https://mp.weixin.qq.com/s/reanalyze-entry",
+                        "published_at": "2026-06-12 08:00",
+                        "summary": ["这里是总结。"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            article_analysis.build_analysis_index_html(
+                {
+                    "analysis_output_dir": d,
+                    "analysis_public_base_url": "https://wx.coco777.vip",
+                    "analysis_reanalyze_path": "/api/reanalyze",
+                }
+            )
+            _, html = self._find_account_page(d, "号A")
+
+            self.assertIn('const REANALYZE_API_URL = "https://wx.coco777.vip/api/reanalyze";', html)
+            self.assertIn('const REANALYZE_API_PATH = "/api/reanalyze";', html)
+            self.assertIn("function resolveReanalyzeApiUrl()", html)
+            self.assertIn("window.location.origin", html)
+            self.assertIn('fetch(resolveReanalyzeApiUrl()', html)
 
     def test_build_analysis_index_html_injects_reanalyze_status_styles(self):
         with tempfile.TemporaryDirectory() as d:
@@ -3776,6 +4002,65 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             wechat_crawler.push_article_to_serverchan = old_push
             wechat_crawler._attach_single_article_analysis = old_attach
 
+    def test_run_reanalyze_from_url_raises_yuanbao_timeout_floor_for_manual_reanalyze(self):
+        captured = []
+
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_attach = wechat_crawler._attach_single_article_analysis
+        try:
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-14",
+                "published_at": "2026-06-14 10:00",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = lambda *args, **kwargs: self.fail(
+                "push=False 时不应推送"
+            )
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                captured.append(
+                    {
+                        "config": dict(config or {}),
+                        "force_reanalyze": force_reanalyze,
+                    }
+                )
+                return {
+                    "status": "ok",
+                    "article_id": "aid-timeout-floor-yuanbao",
+                    "source": str((config or {}).get("analysis_force_provider") or ""),
+                }
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+
+            payload = wechat_crawler.run_reanalyze_from_url(
+                "https://mp.weixin.qq.com/s/provider-yuanbao-timeout",
+                article_id="aid-timeout-floor-yuanbao",
+                provider="yuanbao",
+                push=False,
+                config={
+                    "analysis_enabled": True,
+                    "analysis_timeout_seconds": 15,
+                    "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                },
+            )
+
+            self.assertEqual(payload["analysis"]["source"], "yuanbao")
+            self.assertTrue(captured[-1]["force_reanalyze"])
+            self.assertEqual(captured[-1]["config"]["analysis_force_provider"], "yuanbao")
+            self.assertEqual(
+                captured[-1]["config"]["analysis_news_interpret_url"],
+                "https://news.example.com/api/telegraph/interpret",
+            )
+            self.assertGreaterEqual(captured[-1]["config"]["analysis_timeout_seconds"], 60)
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            wechat_crawler._attach_single_article_analysis = old_attach
+
     def test_handle_reanalyze_api_request_passes_supported_provider_to_runner(self):
         calls = []
 
@@ -4018,6 +4303,45 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             self.assertEqual(result["article_id"], "aid-login")
             self.assertEqual(result["reason"], "wechat_auth_required")
+        finally:
+            if old_runner is not None:
+                wechat_crawler.run_reanalyze_from_url = old_runner
+
+    def test_handle_reanalyze_api_request_preserves_need_login_metadata_from_analysis(self):
+        old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
+        try:
+            wechat_crawler.run_reanalyze_from_url = (
+                lambda *args, **kwargs: {
+                    "analysis": {
+                        "status": "skipped",
+                        "article_id": "aid-need-login",
+                        "reason": "need_login",
+                        "need_login": True,
+                        "needLoginUrl": "/api/telegraph/interpret/file?jobId=test&name=need_login.png",
+                    },
+                    "account": "测试号",
+                    "title": "标题",
+                }
+            )
+
+            result = wechat_crawler.handle_reanalyze_api_request(
+                {
+                    "article_id": "aid-need-login",
+                    "url": "https://mp.weixin.qq.com/s/need-login",
+                    "provider": "yuanbao",
+                },
+                {"analysis_enabled": True},
+                request_headers={"Origin": "http://127.0.0.1:8765"},
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["article_id"], "aid-need-login")
+            self.assertEqual(result["reason"], "need_login")
+            self.assertTrue(result["need_login"])
+            self.assertEqual(
+                result["needLoginUrl"],
+                "/api/telegraph/interpret/file?jobId=test&name=need_login.png",
+            )
         finally:
             if old_runner is not None:
                 wechat_crawler.run_reanalyze_from_url = old_runner

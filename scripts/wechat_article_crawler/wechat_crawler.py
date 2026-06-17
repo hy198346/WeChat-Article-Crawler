@@ -110,6 +110,7 @@ def _normalize_reanalyze_provider(value):
 
 
 MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS = 90
+MANUAL_REANALYZE_YUANBAO_TIMEOUT_FLOOR_SECONDS = 60
 
 
 def _normalize_effective_account_name(value):
@@ -183,6 +184,90 @@ def _resolve_reanalyze_account_name(config, article_id=None, payload_account=Non
         if normalized:
             return normalized
     return ""
+
+
+def _analysis_output_root_path(config) -> Path:
+    raw = str(get_analysis_config(config).get("analysis_output_dir") or "").strip()
+    if not raw:
+        return OUTPUT_ROOT
+    p = Path(raw)
+    return p if p.is_absolute() else (REPO_ROOT / p)
+
+
+def _parse_cached_markdown_header(markdown_text: str, label: str) -> str:
+    text = str(markdown_text or "")
+    if not text:
+        return ""
+    pattern = rf"^\*\*{re.escape(label)}:\*\*\s*(.+?)\s*$"
+    match = re.search(pattern, text, re.MULTILINE)
+    return str(match.group(1) or "").strip() if match else ""
+
+
+def _is_usable_cached_reanalyze_markdown(markdown_text: str) -> bool:
+    text = str(markdown_text or "").strip()
+    if not text:
+        return False
+    first_line = ""
+    for raw_line in text.splitlines():
+        line = str(raw_line or "").strip()
+        if line:
+            first_line = line
+            break
+    if not first_line.startswith("# "):
+        return False
+    header_hits = 0
+    for label in ("Date", "Link", "Account"):
+        if _parse_cached_markdown_header(text, label):
+            header_hits += 1
+    return header_hits >= 2
+
+
+def _load_cached_reanalyze_article(config, article_id=None, article_url=None, account_name=None):
+    normalized = _normalize_article_id(article_id)
+    if not normalized:
+        return None
+    analysis_dir = _analysis_output_root_path(config) / "article_analysis"
+    md_path = analysis_dir / f"{normalized}.md"
+    if not md_path.exists():
+        return None
+    try:
+        markdown = md_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not _is_usable_cached_reanalyze_markdown(markdown):
+        return None
+    meta = {}
+    json_path = analysis_dir / f"{normalized}.json"
+    if json_path.exists():
+        try:
+            meta = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            meta = {}
+    title = str((meta or {}).get("title") or "").strip()
+    if not title:
+        first_line = str(markdown.splitlines()[0] if markdown else "").strip()
+        title = first_line.lstrip("#").strip()
+    url = str((meta or {}).get("url") or "").strip() or str(article_url or "").strip()
+    if not url:
+        url = _parse_cached_markdown_header(markdown, "Link")
+    published_at = str((meta or {}).get("published_at") or "").strip()
+    if not published_at:
+        published_at = _parse_cached_markdown_header(markdown, "Date")
+    date_text = str((meta or {}).get("date") or "").strip()
+    if not date_text and published_at:
+        date_text = str(published_at).split(" ", 1)[0].strip()
+    resolved_account = str((meta or {}).get("account") or "").strip() or str(account_name or "").strip()
+    if not resolved_account:
+        resolved_account = _parse_cached_markdown_header(markdown, "Account")
+    return {
+        "article_id": normalized,
+        "title": title or "Unknown",
+        "url": url,
+        "date": date_text,
+        "published_at": published_at,
+        "account": resolved_account,
+        "markdown": markdown,
+    }
 
 
 def _is_allowed_reanalyze_url(url):
@@ -1328,6 +1413,13 @@ def run_reanalyze_from_url(
                 timeout_seconds = 0
             if timeout_seconds < MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS:
                 config["analysis_timeout_seconds"] = MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS
+        elif normalized_provider == "yuanbao":
+            try:
+                timeout_seconds = int(config.get("analysis_timeout_seconds") or 0)
+            except (TypeError, ValueError):
+                timeout_seconds = 0
+            if timeout_seconds < MANUAL_REANALYZE_YUANBAO_TIMEOUT_FLOOR_SECONDS:
+                config["analysis_timeout_seconds"] = MANUAL_REANALYZE_YUANBAO_TIMEOUT_FLOOR_SECONDS
     resolved_account = _resolve_reanalyze_account_name(
         config,
         article_id=article_id,
@@ -1343,9 +1435,18 @@ def run_reanalyze_from_url(
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-    article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
-    fetched = fetch_article_markdown(article, headers, account_name=resolved_account or None)
-    fetched = dict(fetched or {})
+    fetched = _load_cached_reanalyze_article(
+        config,
+        article_id=article_id,
+        article_url=article_url,
+        account_name=resolved_account or None,
+    )
+    if fetched is None:
+        article = {"title": "Unknown", "link": article_url, "create_time": 0, "digest": "", "author": ""}
+        fetched = fetch_article_markdown(article, headers, account_name=resolved_account or None)
+        fetched = dict(fetched or {})
+    else:
+        fetched = dict(fetched or {})
     if article_id and not fetched.get("article_id"):
         fetched["article_id"] = _normalize_article_id(article_id)
     if resolved_account and not _normalize_effective_account_name(fetched.get("account")):
@@ -1414,7 +1515,20 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
         reason = ""
         if isinstance(analysis, dict):
             reason = str(analysis.get("reason") or analysis.get("status") or "").strip()
-        return {"status": "error", "article_id": article_id or str((analysis or {}).get("article_id") or ""), "reason": reason or "reanalyze_failed"}
+        error_payload = {
+            "status": "error",
+            "article_id": article_id or str((analysis or {}).get("article_id") or ""),
+            "reason": reason or "reanalyze_failed",
+        }
+        if isinstance(analysis, dict):
+            if bool(analysis.get("need_login")) or error_payload["reason"] == "need_login":
+                error_payload["need_login"] = True
+            need_login_url = str(
+                analysis.get("needLoginUrl") or analysis.get("need_login_url") or ""
+            ).strip()
+            if need_login_url:
+                error_payload["needLoginUrl"] = need_login_url
+        return error_payload
     return {
         "status": "ok",
         "article_id": str(analysis.get("article_id") or article_id),
