@@ -3625,6 +3625,150 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if thread is not None:
                 thread.join(timeout=3)
 
+    def test_handle_fetch_latest_all_api_request_runs_push_latest_all_without_push(self):
+        old_run = wechat_crawler.run_push_latest_all
+        old_lock = getattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK", None)
+        calls = []
+        try:
+            wechat_crawler.FETCH_LATEST_ALL_LOCK = threading.Lock()
+
+            def fake_run(config, **kwargs):
+                calls.append({"config": config, **kwargs})
+                return {"count": 2, "articles": [{"title": "A"}, {"title": "B"}]}
+
+            wechat_crawler.run_push_latest_all = fake_run
+            result = wechat_crawler.handle_fetch_latest_all_api_request(
+                {},
+                {
+                    "token": "token",
+                    "cookie": "cookie",
+                    "analysis_public_base_url": "https://wx.coco777.vip",
+                },
+                request_headers={"Origin": "https://wx.coco777.vip"},
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["count"], 2)
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(calls[0]["push"])
+            self.assertFalse(calls[0]["force"])
+        finally:
+            wechat_crawler.run_push_latest_all = old_run
+            if old_lock is None:
+                delattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK")
+            else:
+                wechat_crawler.FETCH_LATEST_ALL_LOCK = old_lock
+
+    def test_handle_fetch_latest_all_api_request_rejects_busy_requests(self):
+        old_lock = getattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK", None)
+        lock = threading.Lock()
+        try:
+            self.assertTrue(lock.acquire(blocking=False))
+            wechat_crawler.FETCH_LATEST_ALL_LOCK = lock
+
+            result = wechat_crawler.handle_fetch_latest_all_api_request(
+                {},
+                {
+                    "token": "token",
+                    "cookie": "cookie",
+                },
+                request_headers=None,
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["reason"], "busy")
+        finally:
+            if lock.locked():
+                lock.release()
+            if old_lock is None:
+                delattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK")
+            else:
+                wechat_crawler.FETCH_LATEST_ALL_LOCK = old_lock
+
+    def test_handle_fetch_latest_all_api_request_returns_explicit_failure_reason(self):
+        old_run = wechat_crawler.run_push_latest_all
+        old_lock = getattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK", None)
+        try:
+            wechat_crawler.FETCH_LATEST_ALL_LOCK = threading.Lock()
+            wechat_crawler.run_push_latest_all = (
+                lambda config, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+            )
+
+            result = wechat_crawler.handle_fetch_latest_all_api_request(
+                {},
+                {
+                    "token": "token",
+                    "cookie": "cookie",
+                },
+                request_headers=None,
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["reason"], "fetch_latest_all_failed:RuntimeError:boom")
+        finally:
+            wechat_crawler.run_push_latest_all = old_run
+            if old_lock is None:
+                delattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK")
+            else:
+                wechat_crawler.FETCH_LATEST_ALL_LOCK = old_lock
+
+    def test_make_reanalyze_request_handler_serves_fetch_latest_all_path_over_http(self):
+        config = {
+            "analysis_enabled": True,
+            "analysis_public_base_url": "https://wx.coco777.vip",
+            "analysis_reanalyze_path": "custom/reanalyze",
+        }
+        old_handle = getattr(wechat_crawler, "handle_fetch_latest_all_api_request", None)
+        server = None
+        thread = None
+        captured = []
+        try:
+            wechat_crawler.handle_fetch_latest_all_api_request = (
+                lambda payload, config, request_headers=None: captured.append(
+                    {
+                        "payload": payload,
+                        "origin": request_headers.get("Origin") if request_headers else "",
+                    }
+                )
+                or {"status": "ok", "count": 3}
+            )
+            server = wechat_crawler.ThreadingHTTPServer(
+                ("127.0.0.1", 0),
+                wechat_crawler.make_reanalyze_request_handler(config),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+            conn.request(
+                "POST",
+                "/api/fetch-latest-all",
+                body=json.dumps({"trigger": "directory_button"}),
+                headers={
+                    "Origin": "https://wx.coco777.vip",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp = conn.getresponse()
+            body = resp.read().decode("utf-8")
+            conn.close()
+
+            self.assertEqual(resp.status, 200)
+            self.assertIn('"status": "ok"', body)
+            self.assertIn('"count": 3', body)
+            self.assertEqual(captured[0]["payload"]["trigger"], "directory_button")
+            self.assertEqual(captured[0]["origin"], "https://wx.coco777.vip")
+        finally:
+            if old_handle is None:
+                delattr(wechat_crawler, "handle_fetch_latest_all_api_request")
+            else:
+                wechat_crawler.handle_fetch_latest_all_api_request = old_handle
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if thread is not None:
+                thread.join(timeout=3)
+
     def test_make_analysis_static_request_handler_serves_static_file_and_reanalyze_post(self):
         old_handle = wechat_crawler.handle_reanalyze_api_request
         server = None
@@ -3689,6 +3833,80 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 self.assertEqual(captured[0]["origin"], "")
         finally:
             wechat_crawler.handle_reanalyze_api_request = old_handle
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if thread is not None:
+                thread.join(timeout=3)
+
+    def test_make_analysis_static_request_handler_serves_static_file_and_fetch_latest_all_post(self):
+        old_handle = getattr(wechat_crawler, "handle_fetch_latest_all_api_request", None)
+        server = None
+        thread = None
+        captured = []
+        try:
+            wechat_crawler.handle_fetch_latest_all_api_request = (
+                lambda payload, config, request_headers=None: captured.append(
+                    {
+                        "payload": payload,
+                        "origin": request_headers.get("Origin") if request_headers else "",
+                    }
+                )
+                or {"status": "ok", "count": 4}
+            )
+
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                article_dir = root / "article_analysis"
+                article_dir.mkdir(parents=True, exist_ok=True)
+                (article_dir / "index.html").write_text("<html><body>analysis ok</body></html>", encoding="utf-8")
+
+                server = wechat_crawler.ThreadingHTTPServer(
+                    ("127.0.0.1", 0),
+                    wechat_crawler.make_analysis_static_request_handler(
+                        {
+                            "analysis_enabled": True,
+                            "analysis_public_base_url": "https://wx.coco777.vip",
+                            "analysis_reanalyze_path": "/api/reanalyze",
+                        },
+                        directory=str(root),
+                    ),
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                conn.request("GET", "/article_analysis/index.html")
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8")
+                conn.close()
+
+                post_conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                post_conn.request(
+                    "POST",
+                    "/api/fetch-latest-all",
+                    body=json.dumps({"trigger": "directory_button"}),
+                    headers={
+                        "Origin": "https://wx.coco777.vip",
+                        "Content-Type": "application/json",
+                    },
+                )
+                post_resp = post_conn.getresponse()
+                post_body = post_resp.read().decode("utf-8")
+                post_conn.close()
+
+                self.assertEqual(resp.status, 200)
+                self.assertIn("analysis ok", body)
+                self.assertEqual(post_resp.status, 200)
+                self.assertIn('"status": "ok"', post_body)
+                self.assertIn('"count": 4', post_body)
+                self.assertEqual(captured[0]["payload"]["trigger"], "directory_button")
+                self.assertEqual(captured[0]["origin"], "")
+        finally:
+            if old_handle is None:
+                delattr(wechat_crawler, "handle_fetch_latest_all_api_request")
+            else:
+                wechat_crawler.handle_fetch_latest_all_api_request = old_handle
             if server is not None:
                 server.shutdown()
                 server.server_close()

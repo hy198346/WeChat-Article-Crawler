@@ -49,6 +49,8 @@ OUTPUT_ROOT = REPO_ROOT / "output"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 _ASYNC_JOB_DISPATCH_MODE = "thread"
+FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all"
+FETCH_LATEST_ALL_LOCK = threading.Lock()
 
 
 def _parse_env_file(path: Path):
@@ -129,6 +131,23 @@ def _resolve_reanalyze_api_path(config) -> str:
     cfg = get_analysis_config(config or {})
     path = str(cfg.get("analysis_reanalyze_path") or "").strip() or "/api/reanalyze"
     return path if path.startswith("/") else f"/{path}"
+
+
+def _api_status_code_from_result(result) -> int:
+    if not isinstance(result, dict):
+        return 500
+    if result.get("status") == "ok":
+        return 200
+    reason = str(result.get("reason") or "").strip()
+    if reason == "forbidden_origin":
+        return 403
+    if reason == "not_found":
+        return 404
+    if reason == "busy":
+        return 409
+    if reason.startswith("reanalyze_failed") or reason.startswith("fetch_latest_all_failed"):
+        return 500
+    return 400
 
 
 def _is_trusted_local_reanalyze_source(headers, config=None) -> bool:
@@ -1538,6 +1557,39 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
     }
 
 
+def handle_fetch_latest_all_api_request(payload, config, request_headers=None):
+    if not isinstance(payload, dict):
+        return {"status": "error", "reason": "invalid_payload"}
+    if request_headers is not None and not _is_trusted_local_reanalyze_source(request_headers, config):
+        return {"status": "error", "reason": "forbidden_origin"}
+    if not FETCH_LATEST_ALL_LOCK.acquire(blocking=False):
+        return {"status": "error", "reason": "busy"}
+    try:
+        result = run_push_latest_all(
+            config,
+            save_markdown=True,
+            push=False,
+            force=False,
+        )
+    except Exception as exc:
+        explicit_reason = str(exc or "").strip()
+        if explicit_reason in (
+            "wechat_auth_required",
+            "wechat_security_verification_required",
+        ):
+            return {"status": "error", "reason": explicit_reason}
+        return {"status": "error", "reason": f"fetch_latest_all_failed:{type(exc).__name__}:{exc}"}
+    finally:
+        FETCH_LATEST_ALL_LOCK.release()
+    count = 0
+    if isinstance(result, dict):
+        try:
+            count = int(result.get("count") or 0)
+        except Exception:
+            count = 0
+    return {"status": "ok", "count": count}
+
+
 def make_reanalyze_request_handler(config):
     expected_path = _resolve_reanalyze_api_path(config)
 
@@ -1586,7 +1638,8 @@ def make_reanalyze_request_handler(config):
             self.end_headers()
 
         def do_POST(self):
-            if urlparse(self.path).path != expected_path:
+            request_path = urlparse(self.path).path
+            if request_path not in (expected_path, FETCH_LATEST_ALL_API_PATH):
                 self._send_json(404, {"status": "error", "reason": "not_found"})
                 return
             try:
@@ -1599,11 +1652,11 @@ def make_reanalyze_request_handler(config):
             except Exception:
                 self._send_json(400, {"status": "error", "reason": "invalid_json"})
                 return
-            result = handle_reanalyze_api_request(payload, config, request_headers=self.headers)
-            status_code = 200 if result.get("status") == "ok" else 400
-            if result.get("reason") == "forbidden_origin":
-                status_code = 403
-            self._send_json(status_code, result)
+            if request_path == FETCH_LATEST_ALL_API_PATH:
+                result = handle_fetch_latest_all_api_request(payload, config, request_headers=self.headers)
+            else:
+                result = handle_reanalyze_api_request(payload, config, request_headers=self.headers)
+            self._send_json(_api_status_code_from_result(result), result)
 
         def log_message(self, format, *args):
             print(f"[{_ts_now()}] reanalyze-api {self.address_string()} {format % args}")
@@ -1641,7 +1694,8 @@ def make_analysis_static_request_handler(config, directory=None):
             self.wfile.write(body)
 
         def do_POST(self):
-            if urlparse(self.path).path != expected_path:
+            request_path = urlparse(self.path).path
+            if request_path not in (expected_path, FETCH_LATEST_ALL_API_PATH):
                 self._send_json(404, {"status": "error", "reason": "not_found"})
                 return
             try:
@@ -1654,16 +1708,11 @@ def make_analysis_static_request_handler(config, directory=None):
             except Exception:
                 self._send_json(400, {"status": "error", "reason": "invalid_json"})
                 return
-            result = handle_reanalyze_api_request(payload, config, request_headers=None)
-            reason = str(result.get("reason") or "").strip()
-            status_code = 200 if result.get("status") == "ok" else 400
-            if reason == "forbidden_origin":
-                status_code = 403
-            elif reason == "not_found":
-                status_code = 404
-            elif reason.startswith("reanalyze_failed"):
-                status_code = 500
-            self._send_json(status_code, result)
+            if request_path == FETCH_LATEST_ALL_API_PATH:
+                result = handle_fetch_latest_all_api_request(payload, config, request_headers=None)
+            else:
+                result = handle_reanalyze_api_request(payload, config, request_headers=None)
+            self._send_json(_api_status_code_from_result(result), result)
 
         def log_message(self, format, *args):
             print(f"[{_ts_now()}] analysis-static {self.address_string()} {format % args}")
