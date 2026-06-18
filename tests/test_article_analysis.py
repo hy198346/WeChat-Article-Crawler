@@ -2564,15 +2564,21 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             html = self._build_and_read_index_html(d)
 
             self.assertIn('const FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all";', html)
-            self.assertIn("const FETCH_LATEST_BUTTON_PLACEHOLDER = true;", html)
             self.assertIn("function setFetchLatestStatus(text, state)", html)
             self.assertIn('document.querySelector(".fetch-latest-button")', html)
+            self.assertIn("async function triggerFetchLatestAll()", html)
+            self.assertIn("fetch(FETCH_LATEST_ALL_API_PATH, {", html)
+            self.assertIn('method: "POST"', html)
+            self.assertIn('headers: { "Content-Type": "application/json" }', html)
+            self.assertIn('body: JSON.stringify({ trigger: "directory_button" })', html)
             self.assertIn("立即抓取中...", html)
             self.assertIn("抓取成功，正在刷新...", html)
             self.assertIn("立即抓取失败，请稍后重试", html)
             self.assertIn("已有抓取任务进行中，请稍后再试", html)
-            self.assertIn("目录页立即抓取按钮骨架已就绪，等待后端接口接入", html)
-            self.assertNotIn("fetch(FETCH_LATEST_ALL_API_PATH", html)
+            self.assertIn('setFetchLatestStatus(FETCH_LATEST_MESSAGES.success, "is-success");', html)
+            self.assertIn('setFetchLatestStatus(FETCH_LATEST_MESSAGES.busy, "is-error");', html)
+            self.assertIn('setFetchLatestStatus(FETCH_LATEST_MESSAGES.error, "is-error");', html)
+            self.assertIn("window.location.reload();", html)
 
     def test_build_analysis_index_html_generates_single_account_pages(self):
         with tempfile.TemporaryDirectory() as d:
