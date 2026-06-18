@@ -2507,6 +2507,70 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertNotIn("目录观点", html)
             self.assertNotIn("第二目录主题", html)
 
+    def test_build_analysis_index_html_renders_directory_fetch_button_skeleton(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "directory-fetch-skeleton",
+                        "account": "骨架目录号",
+                        "title": "目录页顶部按钮",
+                        "url": "https://mp.weixin.qq.com/s/directory-fetch-skeleton",
+                        "published_at": "2026-06-18 09:30",
+                        "summary": "目录页只展示顶部抓取入口骨架",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            html = self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "骨架目录号")
+
+            self.assertIn('class="directory-actions"', html)
+            self.assertIn('class="fetch-latest-button"', html)
+            self.assertIn(">立即抓取</button>", html)
+            self.assertIn('class="fetch-latest-status"', html)
+            self.assertIn("点击后触发目录页立即抓取", html)
+            self.assertNotIn('class="fetch-latest-button"', account_html)
+            self.assertNotIn('class="fetch-latest-status"', account_html)
+
+    def test_build_analysis_index_html_injects_directory_fetch_script_contract(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "directory-fetch-script",
+                        "account": "脚本目录号",
+                        "title": "目录页脚本合同",
+                        "url": "https://mp.weixin.qq.com/s/directory-fetch-script",
+                        "published_at": "2026-06-18 10:00",
+                        "summary": "目录页顶部脚本合同测试",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            html = self._build_and_read_index_html(d)
+
+            self.assertIn('const FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all";', html)
+            self.assertIn("const FETCH_LATEST_BUTTON_PLACEHOLDER = true;", html)
+            self.assertIn("function setFetchLatestStatus(text, state)", html)
+            self.assertIn('document.querySelector(".fetch-latest-button")', html)
+            self.assertIn("立即抓取中...", html)
+            self.assertIn("抓取成功，正在刷新...", html)
+            self.assertIn("立即抓取失败，请稍后重试", html)
+            self.assertIn("已有抓取任务进行中，请稍后再试", html)
+            self.assertIn("目录页立即抓取按钮骨架已就绪，等待后端接口接入", html)
+            self.assertNotIn("fetch(FETCH_LATEST_ALL_API_PATH", html)
+
     def test_build_analysis_index_html_generates_single_account_pages(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "article_analysis"

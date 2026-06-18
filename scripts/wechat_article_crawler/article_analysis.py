@@ -1226,6 +1226,7 @@ def _analysis_page_style_lines():
         "h1{margin:0 0 16px 0;}",
         "h2{margin:24px 0 12px 0;padding-bottom:6px;border-bottom:1px solid #eee;}",
         ".subtitle{color:#666;font-size:12px;margin:-6px 0 18px 0;}",
+        ".directory-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-6px 0 18px 0;}",
         ".directory{margin:0 0 20px 0;padding:14px 16px;background:#f6f8fa;border:1px solid #e5e7eb;border-radius:10px;}",
         ".directory-title{font-weight:600;margin-bottom:10px;}",
         ".directory-group{margin-top:12px;}",
@@ -1233,6 +1234,12 @@ def _analysis_page_style_lines():
         ".directory-list{display:flex;flex-wrap:wrap;gap:8px 10px;}",
         ".directory-link{display:inline-block;padding:4px 10px;border-radius:999px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;}",
         ".directory-link:hover{text-decoration:none;background:#f0f7ff;}",
+        ".fetch-latest-button{border:1px solid #1f6feb;background:#0969da;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px;font-weight:600;}",
+        ".fetch-latest-button[disabled]{cursor:not-allowed;opacity:0.6;}",
+        ".fetch-latest-button.is-busy{cursor:progress;opacity:0.75;}",
+        ".fetch-latest-status{color:#57606a;font-size:12px;}",
+        ".fetch-latest-status.is-success{color:#1a7f37;}",
+        ".fetch-latest-status.is-error{color:#cf222e;}",
         ".account-meta{color:#666;font-weight:400;font-size:12px;margin-left:8px;}",
         ".back-link{display:inline-block;margin-bottom:12px;color:#0969da;text-decoration:none;font-size:13px;}",
         ".back-link:hover{text-decoration:underline;}",
@@ -1450,6 +1457,55 @@ def _render_reanalyze_script_html(config):
     ]
 
 
+def _render_directory_fetch_skeleton_html() -> str:
+    return (
+        '<div class="directory-actions">'
+        '<button type="button" class="fetch-latest-button">立即抓取</button>'
+        '<span class="fetch-latest-status">点击后触发目录页立即抓取</span>'
+        "</div>"
+    )
+
+
+def _render_directory_fetch_script_html():
+    messages = {
+        "pending": "立即抓取中...",
+        "success": "抓取成功，正在刷新...",
+        "error": "立即抓取失败，请稍后重试",
+        "busy": "已有抓取任务进行中，请稍后再试",
+        "placeholder": "目录页立即抓取按钮骨架已就绪，等待后端接口接入",
+    }
+    return [
+        "<script>",
+        'const FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all";',
+        "const FETCH_LATEST_BUTTON_PLACEHOLDER = true;",
+        f"const FETCH_LATEST_MESSAGES = {json.dumps(messages, ensure_ascii=False)};",
+        'const FETCH_LATEST_BUTTON_PLACEHOLDER_TEXT = "目录页立即抓取按钮骨架已就绪，等待后端接口接入";',
+        "function setFetchLatestStatus(text, state) {",
+        '  const status = document.querySelector(".fetch-latest-status");',
+        "  if (!status) return;",
+        "  status.textContent = text || '';",
+        '  status.classList.remove("is-success", "is-error");',
+        "  if (state) {",
+        "    status.classList.add(state);",
+        "  }",
+        "}",
+        'const fetchLatestButton = document.querySelector(".fetch-latest-button");',
+        "if (fetchLatestButton) {",
+        '  fetchLatestButton.addEventListener("click", () => {',
+        '    fetchLatestButton.disabled = true;',
+        '    fetchLatestButton.classList.add("is-busy");',
+        "    setFetchLatestStatus(FETCH_LATEST_MESSAGES.pending);",
+        "    window.setTimeout(() => {",
+        "      fetchLatestButton.disabled = false;",
+        '      fetchLatestButton.classList.remove("is-busy");',
+        '      setFetchLatestStatus(FETCH_LATEST_BUTTON_PLACEHOLDER_TEXT, "is-error");',
+        "    }, 0);",
+        "  });",
+        "}",
+        "</script>",
+    ]
+
+
 def _render_history_summary_label(item: dict) -> str:
     date_text = _normalize_scalar_string(item.get("published_at")) or _normalize_scalar_string(item.get("date"))
     if not date_text:
@@ -1650,6 +1706,7 @@ def build_analysis_index_html(config):
         [
             "<h1>公众号 AI 解读汇总</h1>",
             f'<div class="subtitle">生成时间：{html_escape(generated_at)} ｜ 账号：{total_accounts} ｜ 解读：{total_analyses}</div>',
+            _render_directory_fetch_skeleton_html(),
         ]
     )
 
@@ -1685,6 +1742,7 @@ def build_analysis_index_html(config):
             account_page_paths.get(account),
         )
 
+    html_parts.extend(_render_directory_fetch_script_html())
     html_parts.extend(["</body>", "</html>"])
     content = "\n".join(html_parts) + "\n"
     if not _safe_write_text(analysis_dir / "index.html", content):
