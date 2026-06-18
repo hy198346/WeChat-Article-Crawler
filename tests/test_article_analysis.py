@@ -2537,6 +2537,9 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn("点击后触发目录页立即抓取", html)
             self.assertNotIn('class="fetch-latest-button"', account_html)
             self.assertNotIn('class="fetch-latest-status"', account_html)
+            self.assertNotIn(".directory-actions{", account_html)
+            self.assertNotIn(".fetch-latest-button{", account_html)
+            self.assertNotIn(".fetch-latest-status{", account_html)
 
     def test_build_analysis_index_html_injects_directory_fetch_script_contract(self):
         with tempfile.TemporaryDirectory() as d:

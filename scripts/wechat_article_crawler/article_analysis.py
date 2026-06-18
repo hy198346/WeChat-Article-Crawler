@@ -1226,7 +1226,6 @@ def _analysis_page_style_lines():
         "h1{margin:0 0 16px 0;}",
         "h2{margin:24px 0 12px 0;padding-bottom:6px;border-bottom:1px solid #eee;}",
         ".subtitle{color:#666;font-size:12px;margin:-6px 0 18px 0;}",
-        ".directory-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-6px 0 18px 0;}",
         ".directory{margin:0 0 20px 0;padding:14px 16px;background:#f6f8fa;border:1px solid #e5e7eb;border-radius:10px;}",
         ".directory-title{font-weight:600;margin-bottom:10px;}",
         ".directory-group{margin-top:12px;}",
@@ -1234,12 +1233,6 @@ def _analysis_page_style_lines():
         ".directory-list{display:flex;flex-wrap:wrap;gap:8px 10px;}",
         ".directory-link{display:inline-block;padding:4px 10px;border-radius:999px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;}",
         ".directory-link:hover{text-decoration:none;background:#f0f7ff;}",
-        ".fetch-latest-button{border:1px solid #1f6feb;background:#0969da;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px;font-weight:600;}",
-        ".fetch-latest-button[disabled]{cursor:not-allowed;opacity:0.6;}",
-        ".fetch-latest-button.is-busy{cursor:progress;opacity:0.75;}",
-        ".fetch-latest-status{color:#57606a;font-size:12px;}",
-        ".fetch-latest-status.is-success{color:#1a7f37;}",
-        ".fetch-latest-status.is-error{color:#cf222e;}",
         ".account-meta{color:#666;font-weight:400;font-size:12px;margin-left:8px;}",
         ".back-link{display:inline-block;margin-bottom:12px;color:#0969da;text-decoration:none;font-size:13px;}",
         ".back-link:hover{text-decoration:underline;}",
@@ -1274,7 +1267,19 @@ def _analysis_page_style_lines():
     ]
 
 
-def _render_page_start(title: str):
+def _directory_fetch_style_lines():
+    return [
+        ".directory-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:-6px 0 18px 0;}",
+        ".fetch-latest-button{border:1px solid #1f6feb;background:#0969da;color:#fff;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:13px;font-weight:600;}",
+        ".fetch-latest-button[disabled]{cursor:not-allowed;opacity:0.6;}",
+        ".fetch-latest-button.is-busy{cursor:progress;opacity:0.75;}",
+        ".fetch-latest-status{color:#57606a;font-size:12px;}",
+        ".fetch-latest-status.is-success{color:#1a7f37;}",
+        ".fetch-latest-status.is-error{color:#cf222e;}",
+    ]
+
+
+def _render_page_start(title: str, extra_style_lines=None):
     return [
         "<!doctype html>",
         '<html lang="zh-CN">',
@@ -1284,6 +1289,7 @@ def _render_page_start(title: str):
         f"<title>{html_escape(title)}</title>",
         "<style>",
         *_analysis_page_style_lines(),
+        *(extra_style_lines or []),
         "</style>",
         "</head>",
         "<body>",
@@ -1701,7 +1707,7 @@ def build_analysis_index_html(config):
     ]
     _cleanup_stale_account_pages(analysis_dir, active_account_pages)
 
-    html_parts = _render_page_start("公众号 AI 解读汇总")
+    html_parts = _render_page_start("公众号 AI 解读汇总", extra_style_lines=_directory_fetch_style_lines())
     html_parts.extend(
         [
             "<h1>公众号 AI 解读汇总</h1>",
