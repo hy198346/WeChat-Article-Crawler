@@ -1423,8 +1423,8 @@ def run_reanalyze_from_url(
     if provider is not None and not normalized_provider:
         raise ValueError("invalid_provider")
     if normalized_provider:
-        config["analysis_force_provider"] = normalized_provider
         if normalized_provider == "ollama":
+            config["analysis_force_provider"] = normalized_provider
             config["analysis_news_interpret_url"] = ""
             try:
                 timeout_seconds = int(config.get("analysis_timeout_seconds") or 0)
@@ -1433,6 +1433,9 @@ def run_reanalyze_from_url(
             if timeout_seconds < MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS:
                 config["analysis_timeout_seconds"] = MANUAL_REANALYZE_OLLAMA_TIMEOUT_FLOOR_SECONDS
         elif normalized_provider == "yuanbao":
+            # Manual "元宝解读" keeps the remote chain available instead of forcing
+            # a strict yuanbao-only request, so remote providers can fallback normally.
+            config.pop("analysis_force_provider", None)
             try:
                 timeout_seconds = int(config.get("analysis_timeout_seconds") or 0)
             except (TypeError, ValueError):
@@ -1916,6 +1919,13 @@ def _collect_batch_source_map(per_account_payloads):
     return source_by_key
 
 
+def _build_batch_ollama_only_config(config):
+    cfg = dict(config or {})
+    cfg["analysis_force_provider"] = "ollama"
+    cfg["analysis_news_interpret_url"] = ""
+    return cfg
+
+
 def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads, headers):
     analysis_items = []
     batch_analysis = None
@@ -1923,6 +1933,7 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
     batch_id = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     analysis_cfg = get_analysis_config(config)
     if analysis_cfg.get("analysis_enabled"):
+        batch_config = _build_batch_ollama_only_config(config)
         for article in changed_articles:
             source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
             fetched = source.get("_fetched_article")
@@ -1934,7 +1945,7 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                     except Exception:
                         fetched = None
             if fetched:
-                analysis = _attach_single_article_analysis(config, fetched, refresh_index=False)
+                analysis = _attach_single_article_analysis(batch_config, fetched, refresh_index=False)
             else:
                 analysis = {"status": "skipped", "reason": "missing_article_body"}
             article["analysis"] = analysis
@@ -1948,7 +1959,7 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                     "summary": analysis.get("summary"),
                 }
             )
-        batch_analysis = summarize_analysis_batch(config, analysis_items, batch_id=batch_id)
+        batch_analysis = summarize_analysis_batch(batch_config, analysis_items, batch_id=batch_id)
         if isinstance(batch_analysis, dict) and batch_analysis.get("status") == "ok":
             persist_batch_analysis_outputs(config, batch_analysis)
         _refresh_analysis_index_html(config)

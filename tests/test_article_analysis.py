@@ -1300,7 +1300,8 @@ class TestArticleAnalysis(unittest.TestCase):
                             self.assertEqual(result["summary"], "强制本地新结果")
                             self.assertEqual(result["source"], "local")
                             self.assertEqual(remote_calls, [])
-                            self.assertEqual(len(local_calls), 1)
+                            self.assertEqual(len(local_calls), 2)
+                            self.assertIn("上一轮输出", local_calls[-1])
         finally:
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
@@ -1377,7 +1378,7 @@ class TestArticleAnalysis(unittest.TestCase):
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
 
-    def test_build_single_article_prompt_requests_summary_only(self):
+    def test_build_single_article_prompt_requests_deep_summary_without_extra_schema(self):
         prompt = article_analysis._build_single_article_prompt(
             {
                 "account": "测试号",
@@ -1389,11 +1390,53 @@ class TestArticleAnalysis(unittest.TestCase):
             {"analysis_max_chars": 2000},
         )
 
+        self.assertIn("深度总结", prompt)
+        self.assertIn("不要只给一句", prompt)
         self.assertIn('"summary"', prompt)
         self.assertNotIn('"topic"', prompt)
         self.assertNotIn('"core_points"', prompt)
         self.assertNotIn('"audience"', prompt)
         self.assertNotIn('"risks"', prompt)
+
+    def test_analyze_single_article_local_llm_rewrites_low_quality_summary_once(self):
+        prompts = []
+        responses = iter(
+            [
+                '{"summary":"这篇文章主要讲行业机会。"}',
+                '{"summary":["文章先给出主结论，再展开需求变化、产业链分工和后续趋势判断。","文中还补充了公司角色、竞争变化与读者需要重点关注的变量。"]}',
+            ]
+        )
+
+        def fake_local(config, prompt):
+            prompts.append(prompt)
+            return next(responses)
+
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = fake_local
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "需要重写的公众号文章",
+                        "published_at": "2026-06-22 10:30",
+                        "url": "https://mp.weixin.qq.com/s/rewrite-low-quality-summary",
+                        "markdown": "# 正文\n\n第一段\n\n第二段",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertIn("主结论", result["summary"])
+                self.assertEqual(len(prompts), 2)
+                self.assertIn("信息密度不够", prompts[1])
+                self.assertIn("上一轮输出", prompts[1])
+        finally:
+            article_analysis.call_ollama_chat = old_local
 
     def test_analyze_single_article_local_llm_accepts_summary_json(self):
         old_local = article_analysis.call_ollama_chat
@@ -4217,18 +4260,23 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                         },
                     )
 
-                    self.assertEqual(payload["analysis"]["source"], provider)
+                    expected_source = "" if provider == "yuanbao" else provider
+                    self.assertEqual(payload["analysis"]["source"], expected_source)
                     self.assertTrue(captured[-1]["force_reanalyze"])
                     self.assertFalse(captured[-1]["config"]["analysis_skip_if_exists"])
-                    self.assertEqual(
-                        captured[-1]["config"]["analysis_force_provider"], provider
-                    )
                     if provider == "yuanbao":
+                        self.assertEqual(
+                            captured[-1]["config"].get("analysis_force_provider", ""),
+                            "",
+                        )
                         self.assertEqual(
                             captured[-1]["config"]["analysis_news_interpret_url"],
                             expected_news_url,
                         )
                     else:
+                        self.assertEqual(
+                            captured[-1]["config"]["analysis_force_provider"], provider
+                        )
                         self.assertEqual(
                             captured[-1]["config"]["analysis_news_interpret_url"], ""
                         )
@@ -4339,9 +4387,9 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 },
             )
 
-            self.assertEqual(payload["analysis"]["source"], "yuanbao")
+            self.assertEqual(payload["analysis"]["source"], "")
             self.assertTrue(captured[-1]["force_reanalyze"])
-            self.assertEqual(captured[-1]["config"]["analysis_force_provider"], "yuanbao")
+            self.assertEqual(captured[-1]["config"].get("analysis_force_provider", ""), "")
             self.assertEqual(
                 captured[-1]["config"]["analysis_news_interpret_url"],
                 "https://news.example.com/api/telegraph/interpret",
@@ -6379,6 +6427,81 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
 
 
 class TestBatchSummaryOutput(unittest.TestCase):
+    def test_run_batch_analysis_pipeline_forces_local_ollama_only(self):
+        captured = {"attach_configs": [], "batch_configs": []}
+
+        old_attach = getattr(wechat_crawler, "_attach_single_article_analysis", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_refresh = getattr(wechat_crawler, "_refresh_analysis_index_html", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
+        try:
+            wechat_crawler._attach_single_article_analysis = (
+                lambda config, fetched, refresh_index=True, force_reanalyze=False: captured["attach_configs"].append(dict(config or {}))
+                or {
+                    "status": "ok",
+                    "article_id": "aid-batch-local-only",
+                    "summary": "单篇本地总结",
+                    "source": "local",
+                }
+            )
+            wechat_crawler.summarize_analysis_batch = (
+                lambda config, analyses, batch_id: captured["batch_configs"].append(dict(config or {}))
+                or {
+                    "status": "ok",
+                    "batch_id": batch_id,
+                    "summary": "本轮本地汇总",
+                    "batch_focus": "本地模式",
+                    "shared_themes": ["避免在线 provider"],
+                    "priority_reads": ["A 文"],
+                }
+            )
+            wechat_crawler._refresh_analysis_index_html = lambda config: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
+
+            result = wechat_crawler._run_batch_analysis_pipeline(
+                {
+                    "analysis_enabled": True,
+                    "analysis_force_provider": "",
+                    "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                },
+                [
+                    {
+                        "account": "号A",
+                        "title": "A 文",
+                        "url": "https://mp.weixin.qq.com/s/a",
+                        "fakeid": "fidA",
+                    }
+                ],
+                [
+                    {
+                        "fakeid": "fidA",
+                        "_fetched_article": {
+                            "account": "号A",
+                            "title": "A 文",
+                            "published_at": "2026-06-22 09:00",
+                            "url": "https://mp.weixin.qq.com/s/a",
+                            "markdown": "# A 文\n\n正文",
+                        },
+                    }
+                ],
+                {},
+            )
+
+            self.assertEqual(result["summary"], "本轮本地汇总")
+            self.assertEqual(captured["attach_configs"][0]["analysis_force_provider"], "ollama")
+            self.assertEqual(captured["attach_configs"][0]["analysis_news_interpret_url"], "")
+            self.assertEqual(captured["batch_configs"][0]["analysis_force_provider"], "ollama")
+            self.assertEqual(captured["batch_configs"][0]["analysis_news_interpret_url"], "")
+        finally:
+            if old_attach is not None:
+                wechat_crawler._attach_single_article_analysis = old_attach
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_refresh is not None:
+                wechat_crawler._refresh_analysis_index_html = old_refresh
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
+
     def test_summarize_analysis_batch_keeps_summary_field(self):
         old_call = article_analysis.call_ollama_chat
         try:

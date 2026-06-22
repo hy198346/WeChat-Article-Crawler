@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
@@ -516,11 +517,42 @@ def _build_single_article_prompt(article, cfg):
         "markdown": _truncate_markdown(article.get("markdown", ""), cfg["analysis_max_chars"]),
     }
     return (
-        "你是微信公众号文章总结助手。请基于给定文章信息生成简洁中文总结。"
+        "你是微信公众号文章深度总结助手。请基于给定文章信息生成中文深度总结。"
         "只输出 JSON，不要输出 Markdown、解释、代码块或额外文字。"
         "JSON 必须包含字段：\"summary\"(字符串或字符串数组)。"
-        "如果信息不足，请保持字段存在并用简短总结说明信息有限。\n"
+        "总结必须优先覆盖文章主结论、关键支撑逻辑、重要变化原因，以及文中提到的产业链、技术、公司或趋势。"
+        "不要只给一句笼统概括；尽量输出 2-4 段有信息量的总结。"
+        "如果信息不足，请保持字段存在并明确说明信息有限，但仍要提炼可确认的核心内容。\n"
         f"文章输入：{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _is_low_quality_single_article_summary(text: str) -> bool:
+    s = _normalize_summary_text(text)
+    if not s:
+        return True
+    compact = re.sub(r"\s+", "", s)
+    detail_hits = sum(1 for kw in ("主结论", "逻辑", "产业链", "技术", "公司", "趋势", "驱动", "竞争") if kw in s)
+    weak_hits = sum(1 for kw in ("主要讲", "整体来看", "总体而言", "值得关注") if kw in s)
+    paragraph_count = len([line for line in s.splitlines() if line.strip()])
+    if len(compact) < 45:
+        return True
+    if len(compact) < 80 and detail_hits < 2:
+        return True
+    if paragraph_count <= 1 and detail_hits < 2:
+        return True
+    return weak_hits > 0 and detail_hits < 2
+
+
+def _build_single_article_rewrite_prompt(article, cfg, draft: str):
+    base = _build_single_article_prompt(article, cfg)
+    return (
+        f"{base}\n\n"
+        "下面是上一轮输出，这一版信息密度不够，请在不编造的前提下重写。\n"
+        "重写要求：必须补出主结论之外的关键支撑逻辑，尽量恢复原文的重要信息层次；"
+        "不要只给一句话，优先输出 2-4 段有内容的总结。\n\n"
+        "【上一轮输出】\n"
+        f"{_normalize_summary_text(draft)}"
     )
 
 
@@ -740,6 +772,23 @@ def _analyze_single_article_with_local_llm(config, article, article_id: str):
     try:
         raw_content = call_ollama_chat(config, prompt)
         result = _parse_single_analysis(raw_content)
+        if (
+            result.get("status") == "ok"
+            and _normalize_summary_text(result.get("summary"))
+            and _is_low_quality_single_article_summary(result.get("summary"))
+        ):
+            try:
+                rewrite_prompt = _build_single_article_rewrite_prompt(article, cfg, result.get("summary"))
+                rewrite_raw_content = call_ollama_chat(config, rewrite_prompt)
+                rewrite_result = _parse_single_analysis(rewrite_raw_content)
+                if rewrite_result.get("status") == "ok" and not _is_low_quality_single_article_summary(
+                    rewrite_result.get("summary")
+                ):
+                    result = rewrite_result
+            except requests.Timeout:
+                pass
+            except Exception:
+                pass
         if result.get("status") == "skipped" and result.get("reason") == "empty_analysis":
             try:
                 _log_ollama_schema_drift(raw_content, article, reason="empty_analysis")
