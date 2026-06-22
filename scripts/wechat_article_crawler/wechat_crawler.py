@@ -48,9 +48,13 @@ REPO_ROOT = _repo_root()
 OUTPUT_ROOT = REPO_ROOT / "output"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
+DEBUG_SESSION_ID = "premarket-digest-fail"
+
 _ASYNC_JOB_DISPATCH_MODE = "thread"
 FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all"
+FETCH_LATEST_ALL_STATUS_API_PATH = "/api/fetch-latest-all/status"
 FETCH_LATEST_ALL_LOCK = threading.Lock()
+FETCH_LATEST_ALL_RUNNING = threading.Event()
 
 
 def _parse_env_file(path: Path):
@@ -78,6 +82,32 @@ def _load_env_into_process(root: Path):
     for key, value in _parse_env_file(target).items():
         os.environ.setdefault(key, value)
     return target if target.exists() else None
+
+
+# region debug-point premarket-digest-fail:reporter
+def _dbg_report(hypothesis_id: str, msg: str, data=None):
+    try:
+        env_path = REPO_ROOT / ".dbg" / f"{DEBUG_SESSION_ID}.env"
+        env = _parse_env_file(env_path)
+        url = str(env.get("DEBUG_SERVER_URL") or "").strip()
+        session_id = str(env.get("DEBUG_SESSION_ID") or DEBUG_SESSION_ID).strip() or DEBUG_SESSION_ID
+        if not url or not session_id:
+            return
+        payload = {
+            "sessionId": session_id,
+            "runId": str(os.environ.get("TRAE_DEBUG_RUN_ID") or "pre"),
+            "hypothesisId": str(hypothesis_id or ""),
+            "location": "WeChat-Article-Crawler/scripts/wechat_article_crawler/wechat_crawler.py",
+            "msg": f"[DEBUG] {str(msg or '')}",
+            "data": data if isinstance(data, dict) else {},
+            "ts": int(time.time() * 1000),
+        }
+        requests.post(url, json=payload, timeout=0.8)
+    except Exception:
+        return
+
+
+# endregion debug-point premarket-digest-fail:reporter
 
 # 配置和数据文件路径
 CONFIG_FILE = str(REPO_ROOT / "config.json")
@@ -148,6 +178,17 @@ def _api_status_code_from_result(result) -> int:
     if reason.startswith("reanalyze_failed") or reason.startswith("fetch_latest_all_failed"):
         return 500
     return 400
+
+
+def _has_active_fetch_latest_all_async_job() -> bool:
+    return FETCH_LATEST_ALL_RUNNING.is_set()
+
+
+def handle_fetch_latest_all_status_api_request():
+    return {
+        "status": "ok",
+        "state": "running" if _has_active_fetch_latest_all_async_job() else "idle",
+    }
 
 
 def _is_trusted_local_reanalyze_source(headers, config=None) -> bool:
@@ -1329,6 +1370,20 @@ def _schedule_async_job(name, func, *args, **kwargs):
     return {"status": "scheduled", "name": name, "mode": "thread"}
 
 
+def _run_fetch_latest_all_async_job(config, **kwargs):
+    try:
+        print(f"[{_ts_now()}] fetch_latest_all async job started")
+        run_push_latest_all(config, **kwargs)
+        print(f"[{_ts_now()}] fetch_latest_all async job finished")
+    except Exception as exc:
+        print(
+            f"[{_ts_now()}] WARN fetch_latest_all async job failed: "
+            f"{type(exc).__name__}:{exc}"
+        )
+    finally:
+        FETCH_LATEST_ALL_RUNNING.clear()
+
+
 def build_serverchan_markdown(article_info, config=None):
     title = article_info.get("title") or "(无标题)"
     account = article_info.get("account") or ""
@@ -1507,6 +1562,25 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
     if not provider:
         return {"status": "error", "article_id": article_id, "reason": "invalid_provider"}
     account_name = str(payload.get("account") or "").strip()
+    # region debug-point A:reanalyze-request
+    try:
+        _dbg_report(
+            "A",
+            "reanalyze.request",
+            {
+                "article_id": article_id,
+                "provider": provider,
+                "url": url[:300],
+                "origin": str(getattr(request_headers, "get", lambda *_: "")("Origin") or ""),
+                "referer": str(getattr(request_headers, "get", lambda *_: "")("Referer") or ""),
+                "ua": str(getattr(request_headers, "get", lambda *_: "")("User-Agent") or "")[:160],
+            },
+        )
+    except Exception:
+        pass
+
+    # endregion debug-point A:reanalyze-request
+    started_at = time.time()
     try:
         result = run_reanalyze_from_url(
             url,
@@ -1519,6 +1593,23 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
         )
     except Exception as exc:
         explicit_reason = str(exc or "").strip()
+        # region debug-point A:reanalyze-exception
+        try:
+            _dbg_report(
+                "A",
+                "reanalyze.exception",
+                {
+                    "article_id": article_id,
+                    "provider": provider,
+                    "reason": explicit_reason[:240],
+                    "exc_type": type(exc).__name__,
+                    "took_ms": int((time.time() - started_at) * 1000),
+                },
+            )
+        except Exception:
+            pass
+
+        # endregion debug-point A:reanalyze-exception
         if explicit_reason in (
             "wechat_auth_required",
             "wechat_security_verification_required",
@@ -1537,6 +1628,24 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
         reason = ""
         if isinstance(analysis, dict):
             reason = str(analysis.get("reason") or analysis.get("status") or "").strip()
+        # region debug-point B:reanalyze-non-ok
+        try:
+            _dbg_report(
+                "B",
+                "reanalyze.non_ok",
+                {
+                    "article_id": article_id or str((analysis or {}).get("article_id") or ""),
+                    "provider": provider,
+                    "analysis_status": analysis_status,
+                    "analysis_reason": reason,
+                    "analysis_source": str((analysis or {}).get("source") or ""),
+                    "took_ms": int((time.time() - started_at) * 1000),
+                },
+            )
+        except Exception:
+            pass
+
+        # endregion debug-point B:reanalyze-non-ok
         error_payload = {
             "status": "error",
             "article_id": article_id or str((analysis or {}).get("article_id") or ""),
@@ -1551,6 +1660,22 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
             if need_login_url:
                 error_payload["needLoginUrl"] = need_login_url
         return error_payload
+    # region debug-point B:reanalyze-ok
+    try:
+        _dbg_report(
+            "B",
+            "reanalyze.ok",
+            {
+                "article_id": str(analysis.get("article_id") or article_id),
+                "provider": provider,
+                "source": str(result.get("source") or analysis.get("source") or ""),
+                "took_ms": int((time.time() - started_at) * 1000),
+            },
+        )
+    except Exception:
+        pass
+
+    # endregion debug-point B:reanalyze-ok
     return {
         "status": "ok",
         "article_id": str(analysis.get("article_id") or article_id),
@@ -1568,13 +1693,19 @@ def handle_fetch_latest_all_api_request(payload, config, request_headers=None):
     if not FETCH_LATEST_ALL_LOCK.acquire(blocking=False):
         return {"status": "error", "reason": "busy"}
     try:
-        result = run_push_latest_all(
+        if _has_active_fetch_latest_all_async_job():
+            return {"status": "error", "reason": "busy"}
+        FETCH_LATEST_ALL_RUNNING.set()
+        _schedule_async_job(
+            "fetch_latest_all_manual",
+            _run_fetch_latest_all_async_job,
             config,
             save_markdown=True,
             push=False,
             force=False,
         )
     except Exception as exc:
+        FETCH_LATEST_ALL_RUNNING.clear()
         explicit_reason = str(exc or "").strip()
         if explicit_reason in (
             "wechat_auth_required",
@@ -1584,13 +1715,7 @@ def handle_fetch_latest_all_api_request(payload, config, request_headers=None):
         return {"status": "error", "reason": f"fetch_latest_all_failed:{type(exc).__name__}:{exc}"}
     finally:
         FETCH_LATEST_ALL_LOCK.release()
-    count = 0
-    if isinstance(result, dict):
-        try:
-            count = int(result.get("count") or 0)
-        except Exception:
-            count = 0
-    return {"status": "ok", "count": count}
+    return {"status": "ok", "reason": "scheduled_async"}
 
 
 def make_reanalyze_request_handler(config):
@@ -1639,6 +1764,13 @@ def make_reanalyze_request_handler(config):
             self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
+
+        def do_GET(self):
+            request_path = urlparse(self.path).path
+            if request_path == FETCH_LATEST_ALL_STATUS_API_PATH:
+                self._send_json(200, handle_fetch_latest_all_status_api_request())
+                return
+            self.send_error(501, "Unsupported method ('GET')")
 
         def do_POST(self):
             request_path = urlparse(self.path).path
@@ -1695,6 +1827,13 @@ def make_analysis_static_request_handler(config, directory=None):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_GET(self):
+            request_path = urlparse(self.path).path
+            if request_path == FETCH_LATEST_ALL_STATUS_API_PATH:
+                self._send_json(200, handle_fetch_latest_all_status_api_request())
+                return
+            super().do_GET()
 
         def do_POST(self):
             request_path = urlparse(self.path).path

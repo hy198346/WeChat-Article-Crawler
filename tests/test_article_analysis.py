@@ -1701,6 +1701,48 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_local_llm_accepts_market_style_schema(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: json.dumps(
+            {
+                "market_summary": "近期A股市场活跃度提升，科技板块表现突出。",
+                "key_sectors": [
+                    {"sector": "半导体", "details": "产业链景气度回升，关注上游材料涨价。"},
+                    {"sector": "机器人", "details": "产业化提速，核心零部件受益。"},
+                ],
+                "key_events": [
+                    "全球半导体市场规模增长预期上调",
+                    "部分金属价格波动加大",
+                ],
+                "market_trend": "风险偏好回升但波动可能加大。",
+            },
+            ensure_ascii=False,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "盘前纪要",
+                        "title": "6月22日盘前纪要",
+                        "published_at": "2026-06-22 07:07",
+                        "url": "https://mp.weixin.qq.com/s/j--1-D70oueCWOLXuVVJHg",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertIn("近期A股市场活跃度提升", result["summary"])
+                self.assertIn("半导体", result["summary"])
+                self.assertIn("风险偏好回升", result["summary"])
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_normalizes_string_list_fields(self):
         def fake_post(url, json=None, timeout=0):
             class Resp:
@@ -2607,9 +2649,11 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             html = self._build_and_read_index_html(d)
 
             self.assertIn('const FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all";', html)
+            self.assertIn('const FETCH_LATEST_ALL_STATUS_API_PATH = "/api/fetch-latest-all/status";', html)
             self.assertIn("function setFetchLatestStatus(text, state)", html)
             self.assertIn('document.querySelector(".fetch-latest-button")', html)
             self.assertIn("async function triggerFetchLatestAll()", html)
+            self.assertIn("async function pollFetchLatestAllStatus()", html)
             self.assertIn("fetch(FETCH_LATEST_ALL_API_PATH, {", html)
             self.assertIn('method: "POST"', html)
             self.assertIn('headers: { "Content-Type": "application/json" }', html)
@@ -3674,18 +3718,27 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if thread is not None:
                 thread.join(timeout=3)
 
-    def test_handle_fetch_latest_all_api_request_runs_push_latest_all_without_push(self):
-        old_run = wechat_crawler.run_push_latest_all
+    def test_handle_fetch_latest_all_api_request_schedules_async_job_without_push(self):
+        old_schedule = getattr(wechat_crawler, "_schedule_async_job", None)
+        old_active = getattr(wechat_crawler, "_has_active_fetch_latest_all_async_job", None)
         old_lock = getattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK", None)
         calls = []
         try:
             wechat_crawler.FETCH_LATEST_ALL_LOCK = threading.Lock()
+            wechat_crawler._has_active_fetch_latest_all_async_job = lambda: False
 
-            def fake_run(config, **kwargs):
-                calls.append({"config": config, **kwargs})
-                return {"count": 2, "articles": [{"title": "A"}, {"title": "B"}]}
+            def fake_schedule(name, func, *args, **kwargs):
+                calls.append(
+                    {
+                        "name": name,
+                        "func": func,
+                        "args": args,
+                        "kwargs": kwargs,
+                    }
+                )
+                return {"status": "scheduled", "mode": "process", "pid": 12345}
 
-            wechat_crawler.run_push_latest_all = fake_run
+            wechat_crawler._schedule_async_job = fake_schedule
             result = wechat_crawler.handle_fetch_latest_all_api_request(
                 {},
                 {
@@ -3697,12 +3750,20 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["count"], 2)
+            self.assertEqual(result["reason"], "scheduled_async")
             self.assertEqual(len(calls), 1)
-            self.assertFalse(calls[0]["push"])
-            self.assertFalse(calls[0]["force"])
+            self.assertEqual(calls[0]["name"], "fetch_latest_all_manual")
+            self.assertFalse(calls[0]["kwargs"]["push"])
+            self.assertFalse(calls[0]["kwargs"]["force"])
         finally:
-            wechat_crawler.run_push_latest_all = old_run
+            if old_schedule is None:
+                delattr(wechat_crawler, "_schedule_async_job")
+            else:
+                wechat_crawler._schedule_async_job = old_schedule
+            if old_active is None:
+                delattr(wechat_crawler, "_has_active_fetch_latest_all_async_job")
+            else:
+                wechat_crawler._has_active_fetch_latest_all_async_job = old_active
             if old_lock is None:
                 delattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK")
             else:
@@ -3734,13 +3795,43 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             else:
                 wechat_crawler.FETCH_LATEST_ALL_LOCK = old_lock
 
-    def test_handle_fetch_latest_all_api_request_returns_explicit_failure_reason(self):
-        old_run = wechat_crawler.run_push_latest_all
+    def test_handle_fetch_latest_all_api_request_rejects_active_async_job(self):
+        old_active = getattr(wechat_crawler, "_has_active_fetch_latest_all_async_job", None)
         old_lock = getattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK", None)
         try:
             wechat_crawler.FETCH_LATEST_ALL_LOCK = threading.Lock()
-            wechat_crawler.run_push_latest_all = (
-                lambda config, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
+            wechat_crawler._has_active_fetch_latest_all_async_job = lambda: True
+
+            result = wechat_crawler.handle_fetch_latest_all_api_request(
+                {},
+                {
+                    "token": "token",
+                    "cookie": "cookie",
+                },
+                request_headers=None,
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["reason"], "busy")
+        finally:
+            if old_active is None:
+                delattr(wechat_crawler, "_has_active_fetch_latest_all_async_job")
+            else:
+                wechat_crawler._has_active_fetch_latest_all_async_job = old_active
+            if old_lock is None:
+                delattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK")
+            else:
+                wechat_crawler.FETCH_LATEST_ALL_LOCK = old_lock
+
+    def test_handle_fetch_latest_all_api_request_returns_explicit_failure_reason(self):
+        old_schedule = getattr(wechat_crawler, "_schedule_async_job", None)
+        old_active = getattr(wechat_crawler, "_has_active_fetch_latest_all_async_job", None)
+        old_lock = getattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK", None)
+        try:
+            wechat_crawler.FETCH_LATEST_ALL_LOCK = threading.Lock()
+            wechat_crawler._has_active_fetch_latest_all_async_job = lambda: False
+            wechat_crawler._schedule_async_job = (
+                lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))
             )
 
             result = wechat_crawler.handle_fetch_latest_all_api_request(
@@ -3755,7 +3846,14 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             self.assertEqual(result["reason"], "fetch_latest_all_failed:RuntimeError:boom")
         finally:
-            wechat_crawler.run_push_latest_all = old_run
+            if old_schedule is None:
+                delattr(wechat_crawler, "_schedule_async_job")
+            else:
+                wechat_crawler._schedule_async_job = old_schedule
+            if old_active is None:
+                delattr(wechat_crawler, "_has_active_fetch_latest_all_async_job")
+            else:
+                wechat_crawler._has_active_fetch_latest_all_async_job = old_active
             if old_lock is None:
                 delattr(wechat_crawler, "FETCH_LATEST_ALL_LOCK")
             else:
@@ -3956,6 +4054,53 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 delattr(wechat_crawler, "handle_fetch_latest_all_api_request")
             else:
                 wechat_crawler.handle_fetch_latest_all_api_request = old_handle
+            if server is not None:
+                server.shutdown()
+                server.server_close()
+            if thread is not None:
+                thread.join(timeout=3)
+
+    def test_make_analysis_static_request_handler_serves_fetch_latest_all_status_get(self):
+        old_active = getattr(wechat_crawler, "_has_active_fetch_latest_all_async_job", None)
+        server = None
+        thread = None
+        try:
+            wechat_crawler._has_active_fetch_latest_all_async_job = lambda: True
+
+            with tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                article_dir = root / "article_analysis"
+                article_dir.mkdir(parents=True, exist_ok=True)
+                (article_dir / "index.html").write_text("<html><body>analysis ok</body></html>", encoding="utf-8")
+
+                server = wechat_crawler.ThreadingHTTPServer(
+                    ("127.0.0.1", 0),
+                    wechat_crawler.make_analysis_static_request_handler(
+                        {
+                            "analysis_enabled": True,
+                            "analysis_public_base_url": "https://wx.coco777.vip",
+                            "analysis_reanalyze_path": "/api/reanalyze",
+                        },
+                        directory=str(root),
+                    ),
+                )
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+
+                conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=3)
+                conn.request("GET", "/api/fetch-latest-all/status")
+                resp = conn.getresponse()
+                body = resp.read().decode("utf-8")
+                conn.close()
+
+                self.assertEqual(resp.status, 200)
+                self.assertIn('"status": "ok"', body)
+                self.assertIn('"state": "running"', body)
+        finally:
+            if old_active is None:
+                delattr(wechat_crawler, "_has_active_fetch_latest_all_async_job")
+            else:
+                wechat_crawler._has_active_fetch_latest_all_async_job = old_active
             if server is not None:
                 server.shutdown()
                 server.server_close()

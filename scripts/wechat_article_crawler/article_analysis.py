@@ -10,6 +10,49 @@ from urllib.parse import parse_qsl, urlparse
 
 import requests
 
+DEBUG_SESSION_ID = "premarket-digest-fail"
+
+
+# region debug-point premarket-digest-fail:reporter
+def _dbg_report(hypothesis_id: str, msg: str, data=None):
+    try:
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
+        if str(os.environ.get("TRAE_DEBUG_DISABLE") or "").strip() in ("1", "true", "yes"):
+            return
+        env_path = Path(__file__).resolve().parents[2] / ".dbg" / f"{DEBUG_SESSION_ID}.env"
+        if not env_path.exists():
+            return
+        env = {}
+        for raw in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = (raw or "").strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = (k or "").strip()
+            if not k:
+                continue
+            env[k] = (v or "").strip().strip("'").strip('"').strip()
+        url = str(env.get("DEBUG_SERVER_URL") or "").strip()
+        session_id = str(env.get("DEBUG_SESSION_ID") or DEBUG_SESSION_ID).strip() or DEBUG_SESSION_ID
+        if not url or not session_id:
+            return
+        payload = {
+            "sessionId": session_id,
+            "runId": str(os.environ.get("TRAE_DEBUG_RUN_ID") or "pre"),
+            "hypothesisId": str(hypothesis_id or ""),
+            "location": "WeChat-Article-Crawler/scripts/wechat_article_crawler/article_analysis.py",
+            "msg": f"[DEBUG] {str(msg or '')}",
+            "data": data if isinstance(data, dict) else {},
+            "ts": int(datetime.utcnow().timestamp() * 1000),
+        }
+        requests.post(url, json=payload, timeout=0.8)
+    except Exception:
+        return
+
+
+# endregion debug-point premarket-digest-fail:reporter
+
 
 DEFAULT_ANALYSIS_CONFIG = {
     "analysis_enabled": False,
@@ -651,6 +694,82 @@ def persist_batch_analysis_outputs(config, batch_analysis):
             _safe_write_text(base_path.with_suffix(".md"), body + "\n")
 
 
+def _coerce_market_style_single_analysis(data: dict):
+    market_summary = _normalize_summary_text(
+        data.get("market_summary")
+        or data.get("market_overview")
+        or data.get("overview")
+        or data.get("summary_overview")
+    )
+    market_trend = _normalize_summary_text(data.get("market_trend") or data.get("trend") or data.get("trend_summary"))
+    key_sectors = data.get("key_sectors") or data.get("sectors") or data.get("hot_sectors")
+    key_events = data.get("key_events") or data.get("events") or data.get("key_drivers")
+
+    sector_lines = []
+    core_points = []
+    if isinstance(key_sectors, (list, tuple)):
+        for item in key_sectors:
+            if isinstance(item, dict):
+                sector = _normalize_scalar_string(item.get("sector") or item.get("name") or item.get("title"))
+                details = _normalize_summary_text(
+                    item.get("details")
+                    or item.get("detail")
+                    or item.get("reason")
+                    or item.get("analysis")
+                    or item.get("comment")
+                )
+                if not sector and not details:
+                    continue
+                if sector and details:
+                    sector_lines.append(f"- {sector}：{details}")
+                    core_points.append(f"{sector}：{details}"[:140])
+                elif sector:
+                    sector_lines.append(f"- {sector}")
+                    core_points.append(sector[:140])
+                else:
+                    sector_lines.append(f"- {details}")
+                    core_points.append(details[:140])
+            else:
+                text = _normalize_scalar_string(item)
+                if text:
+                    sector_lines.append(f"- {text}")
+                    core_points.append(text[:140])
+
+    event_lines = []
+    if isinstance(key_events, (list, tuple)):
+        for item in key_events:
+            if isinstance(item, dict):
+                text = _normalize_summary_text(item.get("event") or item.get("title") or item.get("text") or item)
+            else:
+                text = _normalize_summary_text(item)
+            if text:
+                event_lines.append(f"- {text}")
+
+    lines = []
+    if market_summary:
+        lines.append(market_summary)
+    if market_trend:
+        lines.append(f"市场趋势：{market_trend}")
+    if sector_lines:
+        lines.append("重点板块：")
+        lines.extend(sector_lines[:12])
+    if event_lines:
+        lines.append("关键事件：")
+        lines.extend(event_lines[:12])
+
+    summary = "\n".join(line for line in lines if str(line or "").strip())
+    if not _has_meaningful_summary_text(summary):
+        return None
+    return {
+        "status": "ok",
+        "summary": summary,
+        "topic": "",
+        "core_points": core_points[:12],
+        "audience": "",
+        "risks": [],
+    }
+
+
 def _parse_single_analysis(content: str):
     data = json.loads(content)
     summary = _normalize_summary_candidates(
@@ -676,6 +795,10 @@ def _parse_single_analysis(content: str):
             "audience": "",
             "risks": [],
         }
+    if isinstance(data, dict):
+        coerced = _coerce_market_style_single_analysis(data)
+        if isinstance(coerced, dict):
+            return coerced
     topic = _normalize_scalar_string(data.get("topic"))
     audience = _normalize_scalar_string(data.get("audience"))
     risks = _normalize_list(data.get("risks"))
@@ -772,6 +895,24 @@ def _analyze_single_article_with_local_llm(config, article, article_id: str):
     try:
         raw_content = call_ollama_chat(config, prompt)
         result = _parse_single_analysis(raw_content)
+        # region debug-point C:ollama-parse-result
+        try:
+            _dbg_report(
+                "C",
+                "ollama.parse_result",
+                {
+                    "article_id": article_id,
+                    "account": str(article.get("account") or "")[:80],
+                    "title": str(article.get("title") or "")[:120],
+                    "markdown_chars": len(str(article.get("markdown") or "")),
+                    "status": str(result.get("status") or ""),
+                    "reason": str(result.get("reason") or ""),
+                },
+            )
+        except Exception:
+            pass
+
+        # endregion debug-point C:ollama-parse-result
         if (
             result.get("status") == "ok"
             and _normalize_summary_text(result.get("summary"))
@@ -791,6 +932,24 @@ def _analyze_single_article_with_local_llm(config, article, article_id: str):
                 pass
         if result.get("status") == "skipped" and result.get("reason") == "empty_analysis":
             try:
+                # region debug-point C:ollama-empty-analysis
+                try:
+                    _dbg_report(
+                        "C",
+                        "ollama.empty_analysis",
+                        {
+                            "article_id": article_id,
+                            "account": str(article.get("account") or "")[:80],
+                            "title": str(article.get("title") or "")[:120],
+                            "schema_drift": _summarize_ollama_schema_drift(
+                                raw_content, article, reason="empty_analysis"
+                            )[:900],
+                        },
+                    )
+                except Exception:
+                    pass
+
+                # endregion debug-point C:ollama-empty-analysis
                 _log_ollama_schema_drift(raw_content, article, reason="empty_analysis")
             except Exception:
                 pass
@@ -1524,6 +1683,7 @@ def _render_directory_fetch_skeleton_html() -> str:
 def _render_directory_fetch_script_html():
     messages = {
         "pending": "立即抓取中...",
+        "queued": "抓取任务已启动，后台处理中...",
         "success": "抓取成功，正在刷新...",
         "error": "立即抓取失败，请稍后重试",
         "busy": "已有抓取任务进行中，请稍后再试",
@@ -1531,6 +1691,7 @@ def _render_directory_fetch_script_html():
     return [
         "<script>",
         'const FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all";',
+        'const FETCH_LATEST_ALL_STATUS_API_PATH = "/api/fetch-latest-all/status";',
         f"const FETCH_LATEST_MESSAGES = {json.dumps(messages, ensure_ascii=False)};",
         "function setFetchLatestStatus(text, state) {",
         '  const status = document.querySelector(".fetch-latest-status");',
@@ -1542,6 +1703,35 @@ def _render_directory_fetch_script_html():
         "  }",
         "}",
         'const fetchLatestButton = document.querySelector(".fetch-latest-button");',
+        "let fetchLatestStatusPollTimer = 0;",
+        "function queueFetchLatestStatusPoll(delayMs) {",
+        "  if (fetchLatestStatusPollTimer) {",
+        "    window.clearTimeout(fetchLatestStatusPollTimer);",
+        "  }",
+        "  fetchLatestStatusPollTimer = window.setTimeout(pollFetchLatestAllStatus, delayMs);",
+        "}",
+        "async function pollFetchLatestAllStatus() {",
+        "  try {",
+        "    const response = await fetch(FETCH_LATEST_ALL_STATUS_API_PATH, {",
+        '      headers: { "Accept": "application/json" }',
+        "    });",
+        "    const payload = await response.json();",
+        "    if (!response.ok || !payload || payload.status !== 'ok') {",
+        "      throw new Error('fetch_latest_status_failed');",
+        "    }",
+        "    if (payload.state === 'running') {",
+        "      setFetchLatestStatus(FETCH_LATEST_MESSAGES.queued);",
+        "      queueFetchLatestStatusPoll(1500);",
+        "      return;",
+        "    }",
+        '    setFetchLatestStatus(FETCH_LATEST_MESSAGES.success, "is-success");',
+        "    window.setTimeout(() => {",
+        "      window.location.reload();",
+        "    }, 800);",
+        "  } catch (error) {",
+        "    queueFetchLatestStatusPoll(3000);",
+        "  }",
+        "}",
         "async function triggerFetchLatestAll() {",
         "  if (!fetchLatestButton || fetchLatestButton.disabled) return;",
         '  fetchLatestButton.disabled = true;',
@@ -1562,6 +1752,11 @@ def _render_directory_fetch_script_html():
         "      }",
         '      fetchLatestButton.disabled = false;',
         '      fetchLatestButton.classList.remove("is-busy");',
+        "      return;",
+        "    }",
+        "    if (payload.reason === 'scheduled_async') {",
+        "      setFetchLatestStatus(FETCH_LATEST_MESSAGES.queued);",
+        "      queueFetchLatestStatusPoll(1000);",
         "      return;",
         "    }",
         '    setFetchLatestStatus(FETCH_LATEST_MESSAGES.success, "is-success");',
