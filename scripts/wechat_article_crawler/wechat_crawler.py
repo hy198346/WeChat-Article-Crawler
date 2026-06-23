@@ -1005,7 +1005,12 @@ def _build_article_payload(fetched, account_override=""):
         or _normalize_effective_account_name(account_override)
         or str(fetched.get("account") or account_override or "")
     )
+    article_for_id = dict(fetched)
+    if payload_account and not article_for_id.get("account"):
+        article_for_id["account"] = payload_account
+    explicit_article_id = _normalize_article_id(fetched.get("article_id")) or build_article_id(article_for_id)
     return {
+        "article_id": explicit_article_id,
         "account": payload_account,
         "title": fetched.get("title", ""),
         "date": fetched.get("date", ""),
@@ -2253,6 +2258,7 @@ def run_push_latest_all(
                     continue
                 changed_articles.append(
                     {
+                        "article_id": _normalize_article_id(fetched.get("article_id")) or build_article_id(fetched),
                         "account": fetched.get("account") or name or "Unknown_Account",
                         "title": fetched.get("title") or "(无标题)",
                         "date": fetched.get("date", "Unknown"),
@@ -2280,6 +2286,7 @@ def run_push_latest_all(
             continue
 
         changed_articles.append({
+            "article_id": payload.get("article_id") or build_article_id(payload),
             "account": payload["account"],
             "title": payload["title"],
             "date": payload["date"],
