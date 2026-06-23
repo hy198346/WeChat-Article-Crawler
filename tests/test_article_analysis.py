@@ -7412,7 +7412,7 @@ class TestBatchSummaryOutput(unittest.TestCase):
             if old_persist_batch is not None:
                 wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
 
-    def test_drain_analysis_queue_scans_due_batch_jobs_for_recovery(self):
+    def test_drain_analysis_queue_skips_batch_jobs_for_recovery(self):
         batch_calls = []
 
         old_output_root = wechat_crawler.OUTPUT_ROOT
@@ -7454,6 +7454,7 @@ class TestBatchSummaryOutput(unittest.TestCase):
                         {
                             "name": "push_latest_all_analysis",
                             "job_type": "batch_analysis_pipeline",
+                            "queue_name": "analysis-queue",
                             "status": "retry_waiting",
                             "payload": {
                                 "config": {"analysis_enabled": True},
@@ -7487,12 +7488,12 @@ class TestBatchSummaryOutput(unittest.TestCase):
 
                 result = wechat_crawler.drain_analysis_queue({"analysis_enabled": True})
 
-                self.assertEqual(result["processed"], 1)
-                self.assertEqual(result["done"], 1)
+                self.assertEqual(result["processed"], 0)
+                self.assertEqual(result["done"], 0)
                 self.assertTrue(batch_job.exists())
-                done_job = json.loads(batch_job.read_text(encoding="utf-8"))
-                self.assertEqual(done_job.get("status"), "done")
-                self.assertEqual(len(batch_calls), 1)
+                pending_job = json.loads(batch_job.read_text(encoding="utf-8"))
+                self.assertEqual(pending_job.get("status"), "retry_waiting")
+                self.assertEqual(len(batch_calls), 0)
         finally:
             wechat_crawler.OUTPUT_ROOT = old_output_root
             if old_load_cached is not None:

@@ -1048,6 +1048,8 @@ def _async_jobs_dir() -> Path:
 
 _ANALYSIS_QUEUE_LOCK_STALE_SECONDS = 3600
 _ANALYSIS_QUEUE_NAME = "analysis-queue"
+_BATCH_FOLLOWUP_QUEUE_NAME = "analysis-batch-followup"
+_ANALYSIS_QUEUE_RUNNING_STALE_SECONDS = 3600
 
 
 def _analysis_queue_lock_path() -> Path:
@@ -1409,6 +1411,8 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
         retry_state["stop_reason"] = ""
         retry_state["notified"] = False
         job["status"] = "done"
+        job["running_pid"] = 0
+        job["running_started_at"] = ""
         job["retry_state"] = retry_state
         job["last_result"] = dict(analysis)
         job["updated_at"] = _async_retry_time_text()
@@ -1440,6 +1444,8 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
         notify_result = _notify_async_analysis_stop(config, fetched, reason)
         retry_state["notified"] = bool(notify_result.get("ok"))
         job["status"] = "failed_external"
+        job["running_pid"] = 0
+        job["running_started_at"] = ""
         job["retry_state"] = retry_state
         job["last_result"] = dict(analysis) if isinstance(analysis, dict) else {"status": "skipped", "reason": reason}
         job["updated_at"] = _async_retry_time_text()
@@ -1462,6 +1468,8 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
     retry_state["stop_reason"] = ""
     retry_state["notified"] = False
     job["status"] = "retry_waiting"
+    job["running_pid"] = 0
+    job["running_started_at"] = ""
     job["retry_state"] = retry_state
     job["last_result"] = dict(analysis) if isinstance(analysis, dict) else {"status": "skipped", "reason": reason}
     job["updated_at"] = _async_retry_time_text()
@@ -1482,6 +1490,8 @@ def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
         retry_state["stop_reason"] = ""
         retry_state["notified"] = False
         job["status"] = "done"
+        job["running_pid"] = 0
+        job["running_started_at"] = ""
         job["retry_state"] = retry_state
         job["last_result"] = dict(batch_result)
         job["updated_at"] = _async_retry_time_text()
@@ -1501,6 +1511,8 @@ def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
     retry_state["stop_reason"] = ""
     retry_state["notified"] = False
     job["status"] = "retry_waiting"
+    job["running_pid"] = 0
+    job["running_started_at"] = ""
     job["retry_state"] = retry_state
     job["last_result"] = dict(batch_result)
     job["updated_at"] = _async_retry_time_text()
@@ -1539,7 +1551,7 @@ def _serialize_async_job(name, func, args, kwargs):
         return {
             "name": name,
             "job_type": "batch_analysis_pipeline",
-            "queue_name": _ANALYSIS_QUEUE_NAME,
+            "queue_name": _BATCH_FOLLOWUP_QUEUE_NAME,
             "payload": {
                 "config": config,
                 "changed_articles": changed_articles,
@@ -1623,13 +1635,38 @@ def _analysis_queue_job_effective_status(job) -> str:
     return ""
 
 
+def _analysis_queue_job_running_started_ts(job):
+    if not isinstance(job, dict):
+        return None
+    started_at = job.get("running_started_at") or job.get("updated_at")
+    return _parse_async_retry_time_text(started_at)
+
+
+def _is_stale_running_analysis_queue_job(job, now_ts=None) -> bool:
+    if not isinstance(job, dict):
+        return False
+    if _analysis_queue_job_effective_status(job) != "running":
+        return False
+    pid = job.get("running_pid")
+    if pid and not _process_exists(pid):
+        return True
+    started_ts = _analysis_queue_job_running_started_ts(job)
+    if started_ts is None:
+        return False
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    return (current_ts - float(started_ts)) >= float(_ANALYSIS_QUEUE_RUNNING_STALE_SECONDS)
+
+
 def _is_analysis_queue_job(job) -> bool:
     if not isinstance(job, dict):
+        return False
+    job_type = str(job.get("job_type") or "").strip()
+    if job_type != "single_article_analysis":
         return False
     queue_name = str(job.get("queue_name") or "").strip()
     if queue_name:
         return queue_name == _ANALYSIS_QUEUE_NAME
-    return str(job.get("job_type") or "").strip() in ("single_article_analysis", "batch_analysis_pipeline")
+    return True
 
 
 def _analysis_queue_job_sort_key(job_path: Path, job, now_ts=None):
@@ -1638,11 +1675,13 @@ def _analysis_queue_job_sort_key(job_path: Path, job, now_ts=None):
     status = _analysis_queue_job_effective_status(job)
     if status == "pending":
         status_rank = 0
+    elif status == "running" and _is_stale_running_analysis_queue_job(job, now_ts=now_ts):
+        status_rank = 1
     elif status == "retry_waiting" and _seconds_until_async_retry(
         _normalize_async_retry_state((job or {}).get("retry_state")).get("next_retry_at"),
         now_ts=now_ts,
     ) <= 0:
-        status_rank = 1
+        status_rank = 2
     else:
         return None
     job_type = str((job or {}).get("job_type") or "").strip()
@@ -1654,7 +1693,9 @@ def _run_analysis_queue_job(job_path: Path, job):
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "").strip()
     job["status"] = "running"
-    job["updated_at"] = _async_retry_time_text()
+    job["running_pid"] = os.getpid()
+    job["running_started_at"] = _async_retry_time_text()
+    job["updated_at"] = job["running_started_at"]
     _sync_job_retry_fields(job)
     _rewrite_async_job_file(job_path, job)
     if job_type == "single_article_analysis":
