@@ -48,12 +48,24 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("| analysis_base_url | 可选 | http://192.168.9.158:11434 |", content)
         self.assertIn("| analysis_model | 可选 | qwen2.5-coder:14b-cpu |", content)
         self.assertIn("默认顺序重启 `com.wechat.articlecrawler.analysis-queue`", content)
+        self.assertIn("再重启 `com.wechat.articlecrawler.analysis-static`", content)
+        self.assertIn("最后重启 `com.wechat.articlecrawler.reanalyze-api`", content)
         self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist", content)
+        self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist", content)
+        self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist", content)
         self.assertIn("fresh install 时先在项目根目录执行 `mkdir -p logs output`", content)
         self.assertIn("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output", content)
         self.assertLess(
             content.index("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output"),
             content.index('launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist'),
+        )
+        self.assertLess(
+            content.index("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output"),
+            content.index('launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist'),
+        )
+        self.assertLess(
+            content.index("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output"),
+            content.index('launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist'),
         )
 
     def test_config_json_example_aligns_with_code_defaults(self):

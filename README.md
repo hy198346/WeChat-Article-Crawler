@@ -305,6 +305,23 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecraw
 launchctl kickstart -k "gui/$(id -u)/com.wechat.articlecrawler.analysis-queue"
 ```
 
+安装/更新 `analysis-static` 与 `reanalyze-api` LaunchAgent：
+
+- 先把两个 plist 里的绝对路径改成你本机的项目路径，再复制到 `~/Library/LaunchAgents/`
+- fresh install 时同样先在项目根目录执行 `mkdir -p logs output`，确保两个服务的日志目录在 `bootstrap` 前已存在
+
+```bash
+cd /path/to/WeChat-Article-Crawler && mkdir -p logs output
+cp config/launchd/com.wechat.articlecrawler.analysis-static.plist ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist
+cp config/launchd/com.wechat.articlecrawler.reanalyze-api.plist ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist 2>/dev/null || true
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist
+launchctl kickstart -k "gui/$(id -u)/com.wechat.articlecrawler.analysis-static"
+launchctl kickstart -k "gui/$(id -u)/com.wechat.articlecrawler.reanalyze-api"
+```
+
 ## 自动运行（每天 8/12/16/20/24 点）
 
 本项目提供 Windows 计划任务安装脚本，会在每天以下时间自动运行：
@@ -329,29 +346,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\install_scheduled_task
 
 ## macOS：launchd 定时任务 + Watchdog
 
-项目内置了三份 launchd 配置（见 `config/launchd/`），用于：
+项目内置了五份 launchd 配置（见 `config/launchd/`），用于：
 
 - 主任务：`com.wechat.articlecrawler.runproject`（按固定时刻运行 `bin/run_project_launchd.sh`）
 - Watchdog：`com.wechat.articlecrawler.watchdog`（每 10 分钟运行一次 `scripts/wechat_article_crawler/watchdog.py`，检查系统/任务状态，并在异常时自动修复 + Server酱告警）
 - 自动解读队列：`com.wechat.articlecrawler.analysis-queue`（每小时 `05/35` 分运行 `bin/run_analysis_queue_launchd.sh`，依次消费单篇队列和 batch follow-up 队列）
+- 解读聚合页静态服务：`com.wechat.articlecrawler.analysis-static`（常驻运行 `bin/run_analysis_static_launchd.sh`）
+- 重解读接口服务：`com.wechat.articlecrawler.reanalyze-api`（常驻运行 `bin/run_reanalyze_api_launchd.sh`）
 
 安装方式（以当前用户 LaunchAgent 为例）：
 
 1. 将 `config/launchd/*.plist` 复制到 `~/Library/LaunchAgents/`（并把 plist 里的绝对路径改成你本机的项目路径）。
 2. fresh install 时先在项目根目录执行 `mkdir -p logs output`，确保所有 launchd plist 的 `StandardOutPath` / `StandardErrorPath` 父目录在 `bootstrap` 前已存在。
-3. 加载主任务、自动解读队列与 watchdog：
+3. 加载主任务、自动解读队列、静态页服务、重解读接口与 watchdog：
 
 ```bash
 cd /path/to/WeChat-Article-Crawler && mkdir -p logs output
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.runproject.plist
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.watchdog.plist
 ```
 
 4. 查看状态/日志：
 
-- 状态：`launchctl print "gui/$(id -u)/com.wechat.articlecrawler.runproject"` / `...watchdog`
-- 日志：`logs/launchd.run_project.*.log`、`logs/launchd.watchdog.*.log`、`logs/run_project_launchd.last.log`
+- 状态：`launchctl print "gui/$(id -u)/com.wechat.articlecrawler.runproject"`、`...analysis-queue`、`...analysis-static`、`...reanalyze-api`、`...watchdog`
+- 日志：`logs/launchd.run_project.*.log`、`logs/launchd.analysis-queue.*.log`、`logs/launchd.analysis-static.*.log`、`logs/launchd.reanalyze-api.*.log`、`logs/launchd.watchdog.*.log`、`logs/run_project_launchd.last.log`
 
 Watchdog 的可选环境变量在 `.env.example` 里（默认会自动读取根目录 `.env`）。需要告警时，配置 `SERVERCHAN_SENDKEY` 即可。
 
