@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -181,6 +182,245 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                     wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
             write_mock.assert_called_once()
             spawn_mock.assert_called_once()
+
+    def test_drain_analysis_queue_runs_pending_job_to_done(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                return_value={"status": "ok", "summary": "done"},
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"):
+                wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-run-1",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-run-1", "title": "T1"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                self.assertEqual(result["processed"], 1)
+                self.assertEqual(result["done"], 1)
+                job_files = list((root / "async_jobs").glob("*.json"))
+                self.assertEqual(len(job_files), 1)
+                payload = json.loads(job_files[0].read_text(encoding="utf-8"))
+                self.assertEqual(payload["status"], "done")
+
+    def test_drain_analysis_queue_marks_recoverable_failure_as_retry_waiting_without_respawn(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                return_value={"status": "error", "reason": "timeout"},
+            ), mock.patch.object(wechat_crawler, "_spawn_async_job_process") as spawn_mock:
+                job_path = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-run-2",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-run-2", "title": "T2"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                payload = json.loads(Path(job_path).read_text(encoding="utf-8"))
+                self.assertEqual(result["retried"], 1)
+                self.assertEqual(payload["status"], "retry_waiting")
+                self.assertEqual(payload["retry_state"]["last_reason"], "timeout")
+                self.assertTrue(payload["retry_state"]["next_retry_at"])
+                spawn_mock.assert_not_called()
+
+    def test_drain_analysis_queue_marks_external_failure_as_failed_external(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                return_value={"status": "error", "reason": "wechat_auth_required"},
+            ), mock.patch.object(
+                wechat_crawler,
+                "_notify_async_analysis_stop",
+                return_value={"ok": True},
+            ):
+                job_path = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-run-3",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-run-3", "title": "T3"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                payload = json.loads(Path(job_path).read_text(encoding="utf-8"))
+                self.assertEqual(result["failed_external"], 1)
+                self.assertEqual(payload["status"], "failed_external")
+                self.assertEqual(payload["retry_state"]["stop_reason"], "wechat_auth_required")
+
+    def test_drain_analysis_queue_sets_job_running_before_invoking_analysis(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            observed = {}
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                job_files = list((root / "async_jobs").glob("*.json"))
+                self.assertEqual(len(job_files), 1)
+                observed["status_before_return"] = json.loads(job_files[0].read_text(encoding="utf-8")).get("status")
+                return {"status": "ok", "summary": "done"}
+
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                side_effect=fake_attach,
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"):
+                wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-run-running",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-run-running", "title": "TR"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                self.assertEqual(result["done"], 1)
+                self.assertEqual(observed["status_before_return"], "running")
+
+    def test_drain_analysis_queue_skips_when_live_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            lock_path = root / "analysis_queue.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "started_at": "2099-01-01T00:00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root):
+                result = wechat_crawler._drain_analysis_queue_once()
+                self.assertEqual(result["status"], "locked")
+
+    def test_drain_analysis_queue_takes_over_stale_lock_from_dead_pid(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            lock_path = root / "analysis_queue.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": 999999,
+                        "started_at": "2026-06-23T00:00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_process_exists",
+                return_value=False,
+            ), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                return_value={"status": "ok", "summary": "done"},
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"):
+                wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-run-4",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-run-4", "title": "T4"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["done"], 1)
+                self.assertFalse(lock_path.exists())
+
+    def test_drain_analysis_queue_takes_over_stale_lock_from_old_started_at(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            lock_path = root / "analysis_queue.lock"
+            lock_path.write_text(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "started_at": "2000-01-01T00:00:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_process_exists",
+                return_value=True,
+            ), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                return_value={"status": "ok", "summary": "done"},
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"):
+                wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-run-5",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-run-5", "title": "T5"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["done"], 1)
 
 
 if __name__ == "__main__":

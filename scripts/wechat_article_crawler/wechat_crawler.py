@@ -1046,6 +1046,99 @@ def _async_jobs_dir() -> Path:
     return path
 
 
+_ANALYSIS_QUEUE_LOCK_STALE_SECONDS = 3600
+
+
+def _analysis_queue_lock_path() -> Path:
+    return OUTPUT_ROOT / "analysis_queue.lock"
+
+
+def _process_exists(pid) -> bool:
+    try:
+        pid_int = int(pid or 0)
+    except Exception:
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_analysis_queue_lock(lock_path: Path):
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _is_analysis_queue_lock_stale(payload, now_ts=None) -> bool:
+    if not isinstance(payload, dict):
+        return True
+    pid = payload.get("pid")
+    if not _process_exists(pid):
+        return True
+    started_ts = _parse_async_retry_time_text(payload.get("started_at"))
+    if started_ts is None:
+        return False
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    return (current_ts - float(started_ts)) >= float(_ANALYSIS_QUEUE_LOCK_STALE_SECONDS)
+
+
+def _acquire_analysis_queue_lock(now_ts=None):
+    lock_path = _analysis_queue_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "pid": os.getpid(),
+        "started_at": _async_retry_time_text(now_ts),
+    }
+    for _ in range(2):
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            existing = _read_analysis_queue_lock(lock_path)
+            if not _is_analysis_queue_lock_stale(existing, now_ts=now_ts):
+                return None
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return None
+            continue
+        try:
+            os.write(fd, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        finally:
+            os.close(fd)
+        return {"path": lock_path, "payload": payload}
+    return None
+
+
+def _release_analysis_queue_lock(lock_handle):
+    if not isinstance(lock_handle, dict):
+        return
+    lock_path = lock_handle.get("path")
+    payload = lock_handle.get("payload") or {}
+    if not isinstance(lock_path, Path):
+        return
+    current = _read_analysis_queue_lock(lock_path)
+    if current.get("pid") != payload.get("pid") or current.get("started_at") != payload.get("started_at"):
+        return
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
 def _default_async_retry_state():
     return {
         "attempt": 1,
@@ -1212,7 +1305,12 @@ def _find_active_single_article_async_job_by_article_id(article_id: str):
             job = json.loads(job_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             continue
-        if _extract_single_article_async_job_article_id(job) == normalized:
+        if _extract_single_article_async_job_article_id(job) != normalized:
+            continue
+        status = _single_article_async_job_effective_status(job) or "pending"
+        if status == "done":
+            continue
+        if status in ("pending", "running", "retry_waiting", "failed_external"):
             return job_path
     return None
 
@@ -1297,6 +1395,15 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
     fetched = payload.get("fetched") or {}
     retry_state = _normalize_async_retry_state(job.get("retry_state"))
     if _is_successful_async_analysis(analysis):
+        retry_state["last_reason"] = ""
+        retry_state["next_retry_at"] = ""
+        retry_state["stop_reason"] = ""
+        retry_state["notified"] = False
+        job["status"] = "done"
+        job["retry_state"] = retry_state
+        job["last_result"] = dict(analysis)
+        job["updated_at"] = _async_retry_time_text()
+        _rewrite_async_job_file(job_path, job)
         print(
             f"[{_ts_now()}] async single article analysis succeeded "
             f"title={fetched.get('title') or ''} attempt={retry_state.get('attempt')}"
@@ -1325,6 +1432,7 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
         job["status"] = "failed_external"
         job["retry_state"] = retry_state
         job["last_result"] = dict(analysis) if isinstance(analysis, dict) else {"status": "skipped", "reason": reason}
+        job["updated_at"] = _async_retry_time_text()
         _rewrite_async_job_file(job_path, job)
         print(
             f"[{_ts_now()}] async single article analysis stopped "
@@ -1345,33 +1453,27 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
     job["status"] = "retry_waiting"
     job["retry_state"] = retry_state
     job["last_result"] = dict(analysis) if isinstance(analysis, dict) else {"status": "skipped", "reason": reason}
+    job["updated_at"] = _async_retry_time_text()
     _rewrite_async_job_file(job_path, job)
-    try:
-        _spawn_async_job_process(job_path)
-    except Exception as exc:
-        print(
-            f"[{_ts_now()}] WARN async single article analysis respawn failed: "
-            f"{type(exc).__name__}:{exc}"
-        )
-        return {
-            "action": "requeued",
-            "retry_state": retry_state,
-            "delay_seconds": delay_seconds,
-            "spawn_error": f"{type(exc).__name__}:{exc}",
-        }
     print(
-        f"[{_ts_now()}] async single article analysis requeued "
+        f"[{_ts_now()}] async single article analysis queued for retry "
         f"title={fetched.get('title') or ''} reason={reason} attempt={retry_state.get('attempt')}"
     )
     return {"action": "requeued", "retry_state": retry_state, "delay_seconds": delay_seconds}
 
 
 def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
-    if not (
-        isinstance(batch_result, dict)
-        and str(batch_result.get("status") or "").strip() == "pending"
-        and str(batch_result.get("kind") or "").strip() == "batch_summary"
-    ):
+    if isinstance(batch_result, dict) and str(batch_result.get("status") or "").strip() == "ok":
+        retry_state = _normalize_async_retry_state(job.get("retry_state"))
+        retry_state["last_reason"] = ""
+        retry_state["next_retry_at"] = ""
+        retry_state["stop_reason"] = ""
+        retry_state["notified"] = False
+        job["status"] = "done"
+        job["retry_state"] = retry_state
+        job["last_result"] = dict(batch_result)
+        job["updated_at"] = _async_retry_time_text()
+        _rewrite_async_job_file(job_path, job)
         return {"action": "done"}
     retry_state = _normalize_async_retry_state(job.get("retry_state"))
     current_attempt = retry_state.get("attempt") or 1
@@ -1388,22 +1490,10 @@ def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
     job["status"] = "retry_waiting"
     job["retry_state"] = retry_state
     job["last_result"] = dict(batch_result)
+    job["updated_at"] = _async_retry_time_text()
     _rewrite_async_job_file(job_path, job)
-    try:
-        _spawn_async_job_process(job_path)
-    except Exception as exc:
-        print(
-            f"[{_ts_now()}] WARN async batch summary respawn failed: "
-            f"{type(exc).__name__}:{exc}"
-        )
-        return {
-            "action": "requeued",
-            "retry_state": retry_state,
-            "delay_seconds": delay_seconds,
-            "spawn_error": f"{type(exc).__name__}:{exc}",
-        }
     print(
-        f"[{_ts_now()}] async batch summary requeued "
+        f"[{_ts_now()}] async batch summary queued for retry "
         f"reason={retry_state.get('last_reason') or ''} attempt={retry_state.get('attempt')}"
     )
     return {"action": "requeued", "retry_state": retry_state, "delay_seconds": delay_seconds}
@@ -1466,42 +1556,8 @@ def _spawn_async_job_process(job_path):
 
 def _run_async_job_file(job_file):
     job_path = Path(job_file)
-    remove_job_file = True
-    try:
-        job = json.loads(job_path.read_text(encoding="utf-8"))
-        job_type = str(job.get("job_type") or "").strip()
-        payload = job.get("payload") or {}
-        if job_type == "single_article_analysis":
-            _wait_until_async_retry_due(job)
-            analysis = _attach_single_article_analysis(
-                payload.get("config"),
-                payload.get("fetched"),
-                refresh_index=bool(payload.get("refresh_index", True)),
-                force_reanalyze=bool(payload.get("force_reanalyze", False)),
-            )
-            outcome = _handle_async_single_article_result(job, analysis, job_path)
-            if outcome.get("action") in ("requeued", "stop"):
-                remove_job_file = False
-            return
-        if job_type == "batch_analysis_pipeline":
-            _wait_until_async_retry_due(job)
-            batch_result = _run_batch_analysis_pipeline(
-                payload.get("config"),
-                payload.get("changed_articles") or [],
-                payload.get("per_account_payloads") or [],
-                payload.get("headers") or {},
-            )
-            outcome = _handle_async_batch_summary_result(job, batch_result, job_path)
-            if outcome.get("action") == "requeued":
-                remove_job_file = False
-            return
-        raise ValueError(f"unsupported_async_job_type:{job_type}")
-    finally:
-        if remove_job_file:
-            try:
-                job_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+    job = json.loads(job_path.read_text(encoding="utf-8"))
+    _run_analysis_queue_job(job_path, job)
 
 
 def _schedule_async_job(name, func, *args, **kwargs):
@@ -1567,6 +1623,84 @@ def _analysis_queue_job_sort_key(job_path: Path, job, now_ts=None):
     return (status_rank, type_rank, job_path.name)
 
 
+def _run_analysis_queue_job(job_path: Path, job):
+    payload = job.get("payload") or {}
+    job_type = str(job.get("job_type") or "").strip()
+    job["status"] = "running"
+    job["updated_at"] = _async_retry_time_text()
+    _rewrite_async_job_file(job_path, job)
+    if job_type == "single_article_analysis":
+        try:
+            analysis = _attach_single_article_analysis(
+                payload.get("config"),
+                payload.get("fetched"),
+                refresh_index=bool(payload.get("refresh_index", True)),
+                force_reanalyze=bool(payload.get("force_reanalyze", False)),
+            )
+        except Exception as exc:
+            analysis = {"status": "error", "reason": f"{type(exc).__name__}:{exc}"}
+        outcome = _handle_async_single_article_result(job, analysis, job_path)
+        if outcome.get("action") == "done":
+            return "done"
+        if outcome.get("action") == "stop":
+            return "failed_external"
+        return "retried"
+    if job_type == "batch_analysis_pipeline":
+        try:
+            batch_result = _run_batch_analysis_pipeline(
+                payload.get("config"),
+                payload.get("changed_articles") or [],
+                payload.get("per_account_payloads") or [],
+                payload.get("headers") or {},
+            )
+        except Exception as exc:
+            batch_result = {
+                "status": "error",
+                "reason": f"{type(exc).__name__}:{exc}",
+                "kind": "batch_summary",
+            }
+        outcome = _handle_async_batch_summary_result(job, batch_result, job_path)
+        if outcome.get("action") == "done":
+            return "done"
+        return "retried"
+    raise ValueError(f"unsupported_async_job_type:{job_type}")
+
+
+def _iter_due_analysis_jobs(now_ts=None):
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    for job_path in sorted(_async_jobs_dir().glob("*.json")):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if _analysis_queue_job_sort_key(job_path, job, now_ts=current_ts) is None:
+            continue
+        yield job_path, job
+
+
+def _drain_analysis_queue_once(limit=None, now_ts=None):
+    lock_handle = _acquire_analysis_queue_lock(now_ts=now_ts)
+    if lock_handle is None:
+        return {"status": "locked", "processed": 0, "done": 0, "retried": 0, "failed_external": 0}
+    summary = {"status": "ok", "processed": 0, "done": 0, "retried": 0, "failed_external": 0}
+    try:
+        due_jobs = list(_iter_due_analysis_jobs(now_ts=now_ts))
+        if limit:
+            try:
+                max_count = max(0, int(limit))
+            except Exception:
+                max_count = 0
+            if max_count > 0:
+                due_jobs = due_jobs[:max_count]
+        for job_path, job in due_jobs:
+            outcome = _run_analysis_queue_job(job_path, job)
+            summary["processed"] += 1
+            summary[outcome] = int(summary.get(outcome) or 0) + 1
+        return summary
+    finally:
+        _release_analysis_queue_lock(lock_handle)
+
+
 def drain_analysis_queue(config=None, limit=None):
     now_ts = time.time()
     candidates = []
@@ -1589,42 +1723,10 @@ def drain_analysis_queue(config=None, limit=None):
             max_count = 0
         if max_count > 0:
             candidates = candidates[:max_count]
-    processed = 0
-    succeeded = 0
-    requeued = 0
-    terminal = 0
-    failed = 0
-    for _, job_path in candidates:
-        processed += 1
-        try:
-            _run_async_job_file(str(job_path))
-        except Exception as exc:
-            failed += 1
-            print(f"[{_ts_now()}] WARN drain analysis queue failed job={job_path.name} err={type(exc).__name__}:{exc}")
-            continue
-        if not job_path.exists():
-            succeeded += 1
-            continue
-        try:
-            job_after = json.loads(job_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            failed += 1
-            continue
-        status_after = _analysis_queue_job_effective_status(job_after)
-        if status_after == "failed_external":
-            terminal += 1
-        elif status_after == "retry_waiting":
-            requeued += 1
-    return {
-        "status": "ok",
-        "scanned": scanned,
-        "due": len(candidates),
-        "processed": processed,
-        "succeeded": succeeded,
-        "requeued": requeued,
-        "terminal": terminal,
-        "failed": failed,
-    }
+    result = _drain_analysis_queue_once(limit=len(candidates), now_ts=now_ts)
+    result["scanned"] = scanned
+    result["due"] = len(candidates)
+    return result
 
 
 def _run_fetch_latest_all_async_job(config, **kwargs):

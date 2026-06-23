@@ -5473,7 +5473,9 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 self.assertEqual(len(captured), 1)
                 self.assertEqual(captured[0][0]["analysis_enabled"], True)
                 self.assertEqual(captured[0][1]["title"], "标题")
-                self.assertFalse(job_path.exists())
+                self.assertTrue(job_path.exists())
+                done_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(done_job.get("status"), "done")
         finally:
             wechat_crawler._attach_single_article_analysis = old_attach
 
@@ -5604,7 +5606,7 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 wechat_crawler._run_async_job_file(str(job_path))
 
                 self.assertTrue(job_path.exists())
-                self.assertEqual(spawned, [job_path])
+                self.assertEqual(spawned, [])
                 pending_job = json.loads(job_path.read_text(encoding="utf-8"))
                 retry_state = pending_job.get("retry_state") or {}
                 self.assertEqual(retry_state.get("attempt"), 2)
@@ -5614,7 +5616,9 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 load_state["ready"] = True
                 wechat_crawler._run_async_job_file(str(job_path))
 
-                self.assertFalse(job_path.exists())
+                self.assertTrue(job_path.exists())
+                done_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(done_job.get("status"), "done")
                 self.assertEqual(len(batch_calls), 1)
                 self.assertEqual(batch_calls[0][0]["summary"], "缓存补齐总结")
         finally:
@@ -5693,8 +5697,9 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 wechat_crawler._run_async_job_file(str(job_path))
 
                 self.assertTrue(job_path.exists())
-                self.assertEqual(spawned, [job_path])
+                self.assertEqual(spawned, [])
                 retry_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(retry_job.get("status"), "retry_waiting")
                 retry_state = retry_job.get("retry_state") or {}
                 self.assertEqual(retry_state.get("attempt"), 2)
                 self.assertEqual(retry_state.get("retry_mode"), "until_success")
@@ -5773,8 +5778,9 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 wechat_crawler._run_async_job_file(str(job_path))
 
                 self.assertTrue(job_path.exists())
-                self.assertEqual(spawned, [job_path])
+                self.assertEqual(spawned, [])
                 retry_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(retry_job.get("status"), "retry_waiting")
                 retry_state = retry_job.get("retry_state") or {}
                 self.assertEqual(retry_state.get("attempt"), 8)
                 self.assertEqual(retry_state.get("retry_mode"), "until_success")
@@ -5864,12 +5870,16 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
 
                 wechat_crawler._run_async_job_file(str(job_path))
                 self.assertTrue(job_path.exists())
-                self.assertEqual(spawned, [job_path])
+                self.assertEqual(spawned, [])
+                first_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(first_job.get("status"), "retry_waiting")
 
                 spawned.clear()
                 wechat_crawler._run_async_job_file(str(job_path))
 
-                self.assertFalse(job_path.exists())
+                self.assertTrue(job_path.exists())
+                done_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(done_job.get("status"), "done")
                 self.assertEqual(spawned, [])
         finally:
             wechat_crawler.OUTPUT_ROOT = old_output_root
@@ -5973,7 +5983,7 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if old_notify_once is not None:
                 wechat_crawler.send_serverchan_message_once = old_notify_once
 
-    def test_run_async_job_file_waits_until_next_retry_at_before_running(self):
+    def test_run_async_job_file_does_not_sleep_for_next_retry_at(self):
         captured = []
         sleep_calls = []
         fake_now = {"value": 1_800_000_000.0}
@@ -6027,9 +6037,10 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 wechat_crawler._run_async_job_file(str(job_path))
 
                 self.assertEqual(len(captured), 1)
-                self.assertEqual(len(sleep_calls), 1)
-                self.assertAlmostEqual(sleep_calls[0], 10, delta=0.5)
-                self.assertFalse(job_path.exists())
+                self.assertEqual(len(sleep_calls), 0)
+                self.assertTrue(job_path.exists())
+                done_job = json.loads(job_path.read_text(encoding="utf-8"))
+                self.assertEqual(done_job.get("status"), "done")
         finally:
             wechat_crawler._attach_single_article_analysis = old_attach
             wechat_crawler.time.time = old_time
@@ -7477,8 +7488,10 @@ class TestBatchSummaryOutput(unittest.TestCase):
                 result = wechat_crawler.drain_analysis_queue({"analysis_enabled": True})
 
                 self.assertEqual(result["processed"], 1)
-                self.assertEqual(result["succeeded"], 1)
-                self.assertFalse(batch_job.exists())
+                self.assertEqual(result["done"], 1)
+                self.assertTrue(batch_job.exists())
+                done_job = json.loads(batch_job.read_text(encoding="utf-8"))
+                self.assertEqual(done_job.get("status"), "done")
                 self.assertEqual(len(batch_calls), 1)
         finally:
             wechat_crawler.OUTPUT_ROOT = old_output_root
