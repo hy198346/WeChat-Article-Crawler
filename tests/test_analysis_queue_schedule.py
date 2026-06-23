@@ -133,6 +133,55 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                 self.assertEqual(payload["retry_state"]["last_reason"], "")
                 self.assertEqual(payload["retry_state"]["next_retry_at"], "")
 
+    def test_run_extract_from_url_queues_analysis_when_push_enabled(self):
+        fetched = {
+            "article_id": "aid-push-1",
+            "title": "queued article",
+            "account": "测试号",
+            "url": "https://mp.weixin.qq.com/s/aid-push-1",
+            "date": "2026-06-23 10:00",
+            "published_at": "2026-06-23 10:00",
+        }
+        config = {"token": "t", "cookie": "c", "analysis_enabled": True}
+        with mock.patch.object(wechat_crawler, "fetch_article_markdown", return_value=fetched), mock.patch.object(
+            wechat_crawler,
+            "push_article_to_serverchan",
+            return_value={"ok": True},
+        ), mock.patch.object(
+            wechat_crawler,
+            "_enqueue_single_article_analysis_job",
+            return_value={"status": "scheduled"},
+        ) as enqueue_mock:
+            payload = wechat_crawler.run_extract_from_url(
+                "https://mp.weixin.qq.com/s/aid-push-1",
+                push=True,
+                config=config,
+            )
+        self.assertEqual(payload["analysis"]["status"], "pending")
+        enqueue_mock.assert_called_once_with(config, dict(fetched))
+
+    def test_schedule_async_job_process_mode_keeps_non_analysis_jobs_immediate(self):
+        with mock.patch.object(wechat_crawler, "_write_async_job_file") as write_mock, mock.patch.object(
+            wechat_crawler,
+            "_spawn_async_job_process",
+        ) as spawn_mock:
+            old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
+            try:
+                wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
+                wechat_crawler._schedule_async_job(
+                    "batch",
+                    wechat_crawler._run_batch_analysis_pipeline,
+                    {},
+                    [],
+                    [],
+                    {},
+                )
+            finally:
+                if old_mode is not None:
+                    wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
+            write_mock.assert_called_once()
+            spawn_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

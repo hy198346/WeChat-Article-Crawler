@@ -1436,17 +1436,14 @@ def _run_async_job_file(job_file):
 def _schedule_async_job(name, func, *args, **kwargs):
     if _ASYNC_JOB_DISPATCH_MODE == "process":
         job = _serialize_async_job(name, func, args, kwargs)
-        article_id = _extract_single_article_async_job_article_id(job)
-        if article_id:
-            existing_job_path = _find_active_single_article_async_job_by_article_id(article_id)
-            if existing_job_path is not None:
-                return {
-                    "status": "deduped",
-                    "name": name,
-                    "mode": "process",
-                    "article_id": article_id,
-                    "job_file": str(existing_job_path),
-                }
+        if str(job.get("job_type") or "").strip() == "single_article_analysis":
+            payload = job.get("payload") or {}
+            return _enqueue_single_article_analysis_job(
+                payload.get("config") or {},
+                payload.get("fetched") or {},
+                refresh_index=bool(payload.get("refresh_index", True)),
+                force_reanalyze=bool(payload.get("force_reanalyze", False)),
+            )
         job_path = _write_async_job_file(job)
         process = _spawn_async_job_process(job_path)
         return {"status": "scheduled", "name": name, "mode": "process", "pid": getattr(process, "pid", None)}
@@ -2426,8 +2423,13 @@ def run_push_latest_all(
     if changed_articles:
         analysis_cfg = get_analysis_config(config)
         if push and analysis_cfg.get("analysis_enabled"):
+            source_by_key = _collect_batch_source_map(per_account_payloads)
             for article in changed_articles:
                 article["analysis"] = _pending_async_analysis_payload("single_article")
+                source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
+                fetched = source.get("_fetched_article")
+                if fetched:
+                    _enqueue_single_article_analysis_job(config, dict(fetched), refresh_index=False)
             batch_analysis = _pending_async_analysis_payload("batch_summary")
             # region debug-point D:push-latest-all-scheduled
             try:
@@ -2527,7 +2529,7 @@ def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_mark
         payload["serverchan"] = push_result
         if get_analysis_config(config).get("analysis_enabled"):
             payload["analysis"] = _pending_async_analysis_payload("single_article")
-            _schedule_async_job("extract_latest_analysis", _attach_single_article_analysis, config, dict(fetched))
+            _enqueue_single_article_analysis_job(config, dict(fetched))
         else:
             payload["analysis"] = None
     else:
@@ -2565,7 +2567,7 @@ def run_extract_from_url(article_url, account_name=None, save_markdown=False, ou
         payload["serverchan"] = push_result
         if get_analysis_config(config).get("analysis_enabled"):
             payload["analysis"] = _pending_async_analysis_payload("single_article")
-            _schedule_async_job("extract_from_url_analysis", _attach_single_article_analysis, config, dict(fetched))
+            _enqueue_single_article_analysis_job(config, dict(fetched))
         else:
             payload["analysis"] = None
     else:

@@ -5322,65 +5322,48 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if old_wait is not None:
                 wechat_crawler._wait_for_async_jobs = old_wait
 
-    def test_schedule_async_job_uses_detached_process_in_cli_mode(self):
-        calls = []
+    def test_schedule_async_job_uses_detached_process_for_non_single_article_jobs(self):
+        spawned = []
 
         old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
-        old_output_root = wechat_crawler.OUTPUT_ROOT
-        old_popen = getattr(wechat_crawler.subprocess, "Popen", None)
+        old_write = getattr(wechat_crawler, "_write_async_job_file", None)
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
         try:
             wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
+            wechat_crawler._write_async_job_file = lambda job: Path("/tmp/batch-job.json")
 
             class DummyProcess:
                 def __init__(self):
                     self.pid = 12345
 
-            wechat_crawler.subprocess.Popen = lambda *args, **kwargs: calls.append((args, kwargs)) or DummyProcess()
+            wechat_crawler._spawn_async_job_process = lambda job_path: spawned.append(Path(job_path)) or DummyProcess()
 
-            with tempfile.TemporaryDirectory() as d:
-                wechat_crawler.OUTPUT_ROOT = Path(d)
-                result = wechat_crawler._schedule_async_job(
-                    "extract_latest_analysis",
-                    wechat_crawler._attach_single_article_analysis,
-                    {"analysis_enabled": False},
-                    {
-                        "account": "测试号",
-                        "title": "标题",
-                        "date": "2026-06-13",
-                        "published_at": "2026-06-13 09:30",
-                        "url": "https://mp.weixin.qq.com/s/test",
-                    },
-                )
+            result = wechat_crawler._schedule_async_job(
+                "push_latest_all_analysis",
+                wechat_crawler._run_batch_analysis_pipeline,
+                {"analysis_enabled": False},
+                [],
+                [],
+                {},
+            )
 
             self.assertEqual(result["status"], "scheduled")
             self.assertEqual(result["mode"], "process")
-            self.assertEqual(len(calls), 1)
-            cmd = calls[0][0][0]
-            self.assertIn("--run-async-job-file", cmd)
-            self.assertTrue(calls[0][1]["start_new_session"])
+            self.assertEqual(len(spawned), 1)
+            self.assertEqual(spawned[0], Path("/tmp/batch-job.json"))
         finally:
-            wechat_crawler.OUTPUT_ROOT = old_output_root
             if old_mode is not None:
                 wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
-            if old_popen is not None:
-                wechat_crawler.subprocess.Popen = old_popen
+            if old_write is not None:
+                wechat_crawler._write_async_job_file = old_write
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
 
     def test_schedule_async_job_dedupes_same_single_article_by_effective_article_id(self):
-        spawned = []
-
         old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
         old_output_root = wechat_crawler.OUTPUT_ROOT
-        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
         try:
-            class DummyProcess:
-                pid = 56789
-
-            def fake_spawn(job_path):
-                spawned.append(Path(job_path))
-                return DummyProcess()
-
             wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
-            wechat_crawler._spawn_async_job_process = fake_spawn
 
             with tempfile.TemporaryDirectory() as d:
                 wechat_crawler.OUTPUT_ROOT = Path(d)
@@ -5410,31 +5393,17 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
 
                 self.assertEqual(first["status"], "scheduled")
                 self.assertEqual(second["status"], "deduped")
-                self.assertEqual(len(spawned), 1)
                 self.assertEqual(len(list((wechat_crawler.OUTPUT_ROOT / "async_jobs").glob("*.json"))), 1)
         finally:
             wechat_crawler.OUTPUT_ROOT = old_output_root
             if old_mode is not None:
                 wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
-            if old_spawn is not None:
-                wechat_crawler._spawn_async_job_process = old_spawn
 
     def test_schedule_async_job_allows_distinct_single_article_jobs(self):
-        spawned = []
-
         old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
         old_output_root = wechat_crawler.OUTPUT_ROOT
-        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
         try:
-            class DummyProcess:
-                pid = 56790
-
-            def fake_spawn(job_path):
-                spawned.append(Path(job_path))
-                return DummyProcess()
-
             wechat_crawler._ASYNC_JOB_DISPATCH_MODE = "process"
-            wechat_crawler._spawn_async_job_process = fake_spawn
 
             with tempfile.TemporaryDirectory() as d:
                 wechat_crawler.OUTPUT_ROOT = Path(d)
@@ -5464,14 +5433,11 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
 
                 self.assertEqual(first["status"], "scheduled")
                 self.assertEqual(second["status"], "scheduled")
-                self.assertEqual(len(spawned), 2)
                 self.assertEqual(len(list((wechat_crawler.OUTPUT_ROOT / "async_jobs").glob("*.json"))), 2)
         finally:
             wechat_crawler.OUTPUT_ROOT = old_output_root
             if old_mode is not None:
                 wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
-            if old_spawn is not None:
-                wechat_crawler._spawn_async_job_process = old_spawn
 
     def test_run_async_job_file_executes_single_article_analysis_job(self):
         captured = []
@@ -6525,7 +6491,7 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         old_analyze = getattr(wechat_crawler, "analyze_single_article", None)
         old_persist = getattr(wechat_crawler, "persist_single_analysis_outputs", None)
         old_save_md = wechat_crawler.save_url_to_md
-        old_schedule = getattr(wechat_crawler, "_schedule_async_job", None)
+        old_enqueue = getattr(wechat_crawler, "_enqueue_single_article_analysis_job", None)
         try:
             wechat_crawler.resolve_fakeid = lambda *args, **kwargs: "fakeid123"
             wechat_crawler.get_headers = lambda cookie, token: {"Cookie": cookie}
@@ -6561,8 +6527,11 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             )
             wechat_crawler.persist_single_analysis_outputs = lambda config, analysis: None
             wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
-            wechat_crawler._schedule_async_job = (
-                lambda name, func, *args, **kwargs: scheduled.append(name) or {"status": "scheduled", "name": name}
+            wechat_crawler._enqueue_single_article_analysis_job = (
+                lambda config, fetched, *args, **kwargs: scheduled.append(
+                    fetched.get("url") or fetched.get("article_id") or ""
+                )
+                or {"status": "scheduled"}
             )
 
             payload = wechat_crawler.run_extract_latest(
@@ -6573,7 +6542,7 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             )
 
             self.assertEqual(events, ["push"])
-            self.assertEqual(scheduled, ["extract_latest_analysis"])
+            self.assertEqual(scheduled, ["https://mp.weixin.qq.com/s/latest-order"])
             self.assertEqual(payload["analysis"]["status"], "pending")
             self.assertEqual(payload["analysis"]["reason"], "scheduled_async")
         finally:
@@ -6587,8 +6556,8 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             if old_persist is not None:
                 wechat_crawler.persist_single_analysis_outputs = old_persist
             wechat_crawler.save_url_to_md = old_save_md
-            if old_schedule is not None:
-                wechat_crawler._schedule_async_job = old_schedule
+            if old_enqueue is not None:
+                wechat_crawler._enqueue_single_article_analysis_job = old_enqueue
 
     def test_run_push_latest_all_pushes_before_analysis(self):
         events = []
