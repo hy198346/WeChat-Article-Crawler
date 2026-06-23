@@ -6267,6 +6267,7 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
 
     def test_build_serverchan_markdown_articles_links_title_to_single_analysis_page(self):
         article = {
+            "article_id": "serverchan-link-article",
             "account": "号A",
             "group": "测试分组",
             "title": "A 文",
@@ -6283,10 +6284,29 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         expected_url = (
             "https://wx.example.com/article_analysis/"
             f'{article_analysis._account_page_relative_path("号A")}'
-            f'#article-{article_analysis.build_article_id(article)}'
+            "#article-serverchan-link-article"
         )
         self.assertIn(f"- 号A | 2026-06-11 21:30 | [A 文]({expected_url})", desp)
         self.assertIn("[查看解读汇总](https://wx.example.com/article_analysis)", desp)
+
+    def test_build_serverchan_markdown_articles_falls_back_to_plain_title_when_article_id_missing(self):
+        desp = wechat_crawler.build_serverchan_markdown_articles(
+            [
+                {
+                    "account": "号A",
+                    "group": "测试分组",
+                    "title": "缺ID文章",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/missing-article-id",
+                }
+            ],
+            batch_analysis=None,
+            config={"analysis_public_base_url": "https://wx.example.com"},
+        )
+
+        self.assertIn("- 号A | 2026-06-11 21:30 | 缺ID文章", desp)
+        self.assertNotIn("[缺ID文章](", desp)
+        self.assertNotIn("#article-", desp)
 
     def test_build_serverchan_markdown_articles_falls_back_to_plain_title_when_account_missing(self):
         desp = wechat_crawler.build_serverchan_markdown_articles(

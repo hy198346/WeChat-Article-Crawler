@@ -989,7 +989,8 @@ def _resolve_serverchan_single_article_analysis_url(config, article_info) -> str
     account = _normalize_effective_account_name(article_info.get("account"))
     if not account:
         return ""
-    article_id = _article_anchor_id(build_article_id(article_info))
+    explicit_article_id = _normalize_article_id(article_info.get("article_id"))
+    article_id = _article_anchor_id(explicit_article_id)
     if not article_id:
         return ""
     summary_url = _resolve_serverchan_summary_url(config).rstrip("/")
