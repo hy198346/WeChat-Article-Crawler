@@ -45,7 +45,7 @@ playwright install chromium
 
 ### 2. 配置参数
 
-编辑 `config.json` 文件，填写必要参数：
+编辑 `config.json` 文件，填写必要参数。下面示例中的 AI 相关字段使用的是当前代码默认值：
 
 ```json
 {
@@ -56,8 +56,8 @@ playwright install chromium
     "retry_interval_minutes": 5,
     "analysis_enabled": true,
     "analysis_push_batch": true,
-    "analysis_base_url": "http://192.168.9.158:11434/v1",
-    "analysis_model": "qwen3:4b",
+    "analysis_base_url": "http://192.168.9.158:11434",
+    "analysis_model": "qwen2.5-coder:14b-cpu",
     "analysis_timeout_seconds": 30,
     "analysis_max_chars": 8000,
     "analysis_save_json": true,
@@ -125,7 +125,7 @@ ollama serve
 3. 拉取本项目默认模型
 
 ```bash
-ollama pull qwen3:4b
+ollama pull qwen2.5-coder:14b-cpu
 ```
 
 4. 检查服务与模型连通性
@@ -361,7 +361,7 @@ Watchdog 的可选环境变量在 `.env.example` 里（默认会自动读取根�
 | retry_interval_minutes | 可选 | 5 | 重试间隔（分钟），发生错误后等待多久重试 |
 | analysis_enabled | 可选 | false | 是否启用 Ollama 文章解读，默认关闭以避免旧配置/空配置误触发 |
 | analysis_push_batch | 可选 | true | 批量推送时是否追加“本轮解读” |
-| analysis_base_url | 可选 | http://192.168.9.158:11434/v1 | Ollama 服务地址，支持被环境变量覆盖 |
+| analysis_base_url | 可选 | http://192.168.9.158:11434 | Ollama 服务地址，支持被环境变量覆盖 |
 | analysis_model | 可选 | qwen2.5-coder:14b-cpu | 文章解读模型 |
 | analysis_timeout_seconds | 可选 | 30 | 单次 AI 调用超时秒数 |
 | analysis_max_chars | 可选 | 8000 | 送入模型的文章最大字符数 |

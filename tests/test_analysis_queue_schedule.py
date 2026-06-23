@@ -1,6 +1,7 @@
 import json
 import os
 import plistlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,10 +9,12 @@ from unittest import mock
 
 import wechat_crawler
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 class TestAnalysisQueueSchedule(unittest.TestCase):
     def test_analysis_queue_plist_uses_every_30_minute_schedule(self):
-        plist_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/config/launchd/com.wechat.articlecrawler.analysis-queue.plist")
+        plist_path = REPO_ROOT / "config/launchd/com.wechat.articlecrawler.analysis-queue.plist"
         payload = plistlib.loads(plist_path.read_bytes())
         self.assertEqual(payload["Label"], "com.wechat.articlecrawler.analysis-queue")
         self.assertEqual(payload["StartCalendarInterval"], [{"Minute": 5}, {"Minute": 35}])
@@ -19,19 +22,19 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
             payload["ProgramArguments"],
             [
                 "/bin/zsh",
-                "/Users/chenwangqian/trae/WeChat-Article-Crawler/bin/run_analysis_queue_launchd.sh",
+                str(REPO_ROOT / "bin/run_analysis_queue_launchd.sh"),
             ],
         )
 
     def test_analysis_queue_launchd_script_runs_both_queue_drains(self):
-        script_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/bin/run_analysis_queue_launchd.sh")
+        script_path = REPO_ROOT / "bin/run_analysis_queue_launchd.sh"
         content = script_path.read_text(encoding="utf-8")
         self.assertIn("--drain-analysis-queue", content)
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertLess(content.index("--drain-analysis-queue"), content.index("--drain-batch-followup-queue"))
 
     def test_readme_documents_final_queue_workflow_and_batch_followup_drain(self):
-        readme_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/README.md")
+        readme_path = REPO_ROOT / "README.md"
         content = readme_path.read_text(encoding="utf-8")
         self.assertIn("## 自动解读队列", content)
         self.assertIn("com.wechat.articlecrawler.analysis-queue", content)
@@ -40,11 +43,13 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertIn("analysis-batch-followup", content)
         self.assertIn("先把 plist 里的绝对路径改成你本机的项目路径", content)
+        self.assertIn('"analysis_base_url": "http://192.168.9.158:11434"', content)
+        self.assertIn('"analysis_model": "qwen2.5-coder:14b-cpu"', content)
+        self.assertIn("| analysis_base_url | 可选 | http://192.168.9.158:11434 |", content)
+        self.assertIn("| analysis_model | 可选 | qwen2.5-coder:14b-cpu |", content)
 
     def test_spec_documents_batch_followup_drain_behavior(self):
-        spec_path = Path(
-            "/Users/chenwangqian/trae/WeChat-Article-Crawler/docs/superpowers/specs/2026-06-23-wechat-analysis-queue-design.md"
-        )
+        spec_path = REPO_ROOT / "docs/superpowers/specs/2026-06-23-wechat-analysis-queue-design.md"
         content = spec_path.read_text(encoding="utf-8")
         self.assertIn("## Implementation Notes", content)
         self.assertIn("Automatic analysis now uses enqueue-only scheduling", content)
@@ -52,6 +57,47 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("--drain-analysis-queue", content)
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertIn("analysis-batch-followup", content)
+
+    def test_drain_commands_do_not_fallback_to_config_json_example(self):
+        old_argv = sys.argv[:]
+        load_calls = []
+        drain_calls = []
+        old_load_json = wechat_crawler.load_json
+        old_exists = wechat_crawler.os.path.exists
+        old_drain = wechat_crawler.drain_analysis_queue
+        old_load_env = wechat_crawler._load_env_into_process
+        try:
+            sys.argv = ["wechat_crawler.py", "--drain-analysis-queue"]
+
+            def fake_load_json(path):
+                load_calls.append(path)
+                if path == wechat_crawler.CONFIG_FILE:
+                    return {}
+                if path.endswith("config.json.example"):
+                    raise AssertionError("drain command should not read config.json.example")
+                return {}
+
+            wechat_crawler.load_json = fake_load_json
+            wechat_crawler.os.path.exists = lambda path: True
+            wechat_crawler._load_env_into_process = lambda root: None
+            wechat_crawler.drain_analysis_queue = lambda config: drain_calls.append(dict(config or {})) or {
+                "status": "ok",
+                "processed": 0,
+                "done": 0,
+                "retried": 0,
+                "failed_external": 0,
+            }
+
+            wechat_crawler.main()
+
+            self.assertEqual(load_calls, [wechat_crawler.CONFIG_FILE])
+            self.assertEqual(drain_calls, [{}])
+        finally:
+            sys.argv = old_argv
+            wechat_crawler.load_json = old_load_json
+            wechat_crawler.os.path.exists = old_exists
+            wechat_crawler._load_env_into_process = old_load_env
+            wechat_crawler.drain_analysis_queue = old_drain
 
     def test_enqueue_single_article_analysis_creates_pending_job(self):
         with tempfile.TemporaryDirectory() as d:

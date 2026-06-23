@@ -3761,20 +3761,22 @@ def main():
         _run_async_job_file(args.run_async_job_file)
         return
 
-    config = load_json(CONFIG_FILE)
-    config_example = str(REPO_ROOT / "config.json.example")
-    if (not config) and os.path.exists(config_example):
-        config = load_json(config_example)
-
     if args.drain_analysis_queue:
+        config = load_json(CONFIG_FILE)
         result = drain_analysis_queue(config)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
     if args.drain_batch_followup_queue:
+        config = load_json(CONFIG_FILE)
         result = drain_batch_followup_queue(config)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
+
+    config = load_json(CONFIG_FILE)
+    config_example = str(REPO_ROOT / "config.json.example")
+    if (not config) and os.path.exists(config_example):
+        config = load_json(config_example)
 
     if args.refresh_auth:
         try:
