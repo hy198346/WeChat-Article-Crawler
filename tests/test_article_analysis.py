@@ -1662,6 +1662,37 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_local_llm_accepts_response_only_schema(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: json.dumps(
+            {
+                "response": "微信把 AI 助手接入聊天、群聊和小程序生态，核心变化是把 AI 能力嵌进高频沟通场景。",
+            },
+            ensure_ascii=False,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "差评X.PIN",
+                        "title": "体验完微信的AI，我发现了一种“危机”感。",
+                        "published_at": "2026-06-23 17:10",
+                        "url": "https://mp.weixin.qq.com/s/r8ErFAilYlN2VcuMF20eIQ",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertIn("微信把 AI 助手接入聊天", result["summary"])
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_local_llm_accepts_trend_style_schema(self):
         old_local = article_analysis.call_ollama_chat
         article_analysis.call_ollama_chat = lambda config, prompt: json.dumps(
@@ -2666,6 +2697,71 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn('setFetchLatestStatus(FETCH_LATEST_MESSAGES.busy, "is-error");', html)
             self.assertIn('setFetchLatestStatus(FETCH_LATEST_MESSAGES.error, "is-error");', html)
             self.assertIn("window.location.reload();", html)
+
+    def test_build_analysis_index_html_includes_mobile_viewport_and_responsive_styles(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "mobile-index-entry",
+                        "account": "手机目录号",
+                        "title": "一个特别长的目录标题用于验证手机端窄屏换行不会挤出容器",
+                        "url": "https://mp.weixin.qq.com/s/mobile-index-entry",
+                        "published_at": "2026-06-23 10:00",
+                        "summary": "目录页手机端样式测试",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            html = self._build_and_read_index_html(d)
+
+            self.assertIn(
+                '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+                html,
+            )
+            self.assertIn("@media (max-width: 640px){", html)
+            self.assertIn(".directory-list{grid-template-columns:1fr;}", html)
+            self.assertIn(".directory-link{display:block;padding:12px 14px;border-radius:12px;}", html)
+            self.assertIn(".fetch-latest-button{width:100%;min-height:42px;}", html)
+            self.assertIn("overflow-wrap:anywhere;", html)
+
+    def test_build_analysis_index_html_account_page_includes_mobile_responsive_styles(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "mobile-account-entry",
+                        "account": "手机账号页号",
+                        "title": "账号页手机端样式测试",
+                        "url": "https://mp.weixin.qq.com/s/mobile-account-entry",
+                        "published_at": "2026-06-23 10:30",
+                        "summary": "这是一段很长很长的总结，用于验证手机端按钮区、正文区和长文本断行样式都已经注入到账号页。",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "手机账号页号")
+
+            self.assertIn(
+                '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+                account_html,
+            )
+            self.assertIn("@media (max-width: 640px){", account_html)
+            self.assertIn(".actions{align-items:stretch;flex-direction:column;}", account_html)
+            self.assertIn(".reanalyze-button{width:100%;min-height:40px;}", account_html)
+            self.assertIn("summary{padding:6px 0;}", account_html)
+            self.assertIn("word-break:break-word;", account_html)
 
     def test_build_analysis_index_html_generates_single_account_pages(self):
         with tempfile.TemporaryDirectory() as d:
@@ -6572,7 +6668,7 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
 
 
 class TestBatchSummaryOutput(unittest.TestCase):
-    def test_run_batch_analysis_pipeline_forces_local_ollama_only(self):
+    def test_run_batch_analysis_pipeline_keeps_remote_chain_for_single_article_analysis(self):
         captured = {"attach_configs": [], "batch_configs": []}
 
         old_attach = getattr(wechat_crawler, "_attach_single_article_analysis", None)
@@ -6633,8 +6729,11 @@ class TestBatchSummaryOutput(unittest.TestCase):
             )
 
             self.assertEqual(result["summary"], "本轮本地汇总")
-            self.assertEqual(captured["attach_configs"][0]["analysis_force_provider"], "ollama")
-            self.assertEqual(captured["attach_configs"][0]["analysis_news_interpret_url"], "")
+            self.assertEqual(captured["attach_configs"][0].get("analysis_force_provider", ""), "")
+            self.assertEqual(
+                captured["attach_configs"][0]["analysis_news_interpret_url"],
+                "https://news.example.com/api/telegraph/interpret",
+            )
             self.assertEqual(captured["batch_configs"][0]["analysis_force_provider"], "ollama")
             self.assertEqual(captured["batch_configs"][0]["analysis_news_interpret_url"], "")
         finally:

@@ -10,7 +10,7 @@ from urllib.parse import parse_qsl, urlparse
 
 import requests
 
-DEBUG_SESSION_ID = "premarket-digest-fail"
+DEBUG_SESSION_ID = "wechat-interpret-failures"
 
 
 # region debug-point premarket-digest-fail:reporter
@@ -79,6 +79,7 @@ OLLAMA_SCHEMA_DRIFT_CANDIDATE_FIELDS = (
     "analysis",
     "text",
     "result",
+    "response",
     "key_points",
     "core_points",
     "trend_impact",
@@ -778,6 +779,7 @@ def _parse_single_analysis(content: str):
         data.get("analysis"),
         data.get("text"),
         data.get("result"),
+        data.get("response"),
         data.get("trend_impact"),
         data.get("key_impact"),
         data.get("core_trend"),
@@ -872,6 +874,23 @@ def _call_news_interpret(config, article):
     if not api_url:
         return None
     provider = _normalize_analysis_force_provider(cfg.get("analysis_force_provider")) or "auto"
+    # region debug-point A:news-interpret-request
+    try:
+        _dbg_report(
+            "A",
+            "news_interpret.request",
+            {
+                "article_id": build_article_id(article),
+                "account": str(article.get("account") or "")[:80],
+                "title": str(article.get("title") or "")[:120],
+                "provider": provider,
+                "api_url": api_url[:200],
+                "content_chars": len(_truncate_markdown(article.get("markdown", ""), cfg["analysis_max_chars"])),
+            },
+        )
+    except Exception:
+        pass
+    # endregion debug-point A:news-interpret-request
     response = requests.post(
         api_url,
         json={
@@ -886,7 +905,30 @@ def _call_news_interpret(config, article):
         timeout=cfg["analysis_timeout_seconds"],
     )
     response.raise_for_status()
-    return response.json()
+    data = response.json()
+    # region debug-point A:news-interpret-response
+    try:
+        _dbg_report(
+            "A",
+            "news_interpret.response",
+            {
+                "article_id": build_article_id(article),
+                "account": str(article.get("account") or "")[:80],
+                "title": str(article.get("title") or "")[:120],
+                "status_code": response.status_code,
+                "ok": bool(data.get("ok") is True),
+                "error": str(data.get("error") or ""),
+                "message": str(data.get("message") or "")[:300],
+                "providerUsed": str(data.get("providerUsed") or ""),
+                "attemptedProviders": ",".join([str(x or "") for x in (data.get("attemptedProviders") or [])[:6]]),
+                "need_login": bool(data.get("need_login") or data.get("needLoginUrl")),
+                "debug_tail": "\n".join([str(x or "")[:160] for x in (data.get("debugLog") or [])[-4:]])[:900],
+            },
+        )
+    except Exception:
+        pass
+    # endregion debug-point A:news-interpret-response
+    return data
 
 
 def _analyze_single_article_with_local_llm(config, article, article_id: str):
@@ -1053,6 +1095,25 @@ def analyze_single_article(config, article):
         try:
             remote_result = _call_news_interpret(config, article)
             normalized = _normalize_remote_summary_analysis(remote_result, article)
+            # region debug-point B:remote-normalized
+            try:
+                _dbg_report(
+                    "B",
+                    "analysis.remote_normalized",
+                    {
+                        "article_id": article_id,
+                        "account": str(article.get("account") or "")[:80],
+                        "title": str(article.get("title") or "")[:120],
+                        "status": str(normalized.get("status") or ""),
+                        "reason": str(normalized.get("reason") or "")[:240],
+                        "source": str(normalized.get("source") or ""),
+                        "need_login": bool(normalized.get("need_login") or normalized.get("needLoginUrl")),
+                        "summary_chars": len(str(normalized.get("summary") or "")),
+                    },
+                )
+            except Exception:
+                pass
+            # endregion debug-point B:remote-normalized
             if normalized.get("status") == "ok":
                 result = normalized
             else:
@@ -1062,8 +1123,37 @@ def analyze_single_article(config, article):
                     result = normalized
         except requests.Timeout:
             remote_error = "news_interpret_timeout"
+            # region debug-point B:remote-timeout
+            try:
+                _dbg_report(
+                    "B",
+                    "analysis.remote_timeout",
+                    {
+                        "article_id": article_id,
+                        "account": str(article.get("account") or "")[:80],
+                        "title": str(article.get("title") or "")[:120],
+                    },
+                )
+            except Exception:
+                pass
+            # endregion debug-point B:remote-timeout
         except Exception as exc:
             remote_error = f"news_interpret_failed:{type(exc).__name__}:{exc}"
+            # region debug-point B:remote-exception
+            try:
+                _dbg_report(
+                    "B",
+                    "analysis.remote_exception",
+                    {
+                        "article_id": article_id,
+                        "account": str(article.get("account") or "")[:80],
+                        "title": str(article.get("title") or "")[:120],
+                        "error": remote_error[:400],
+                    },
+                )
+            except Exception:
+                pass
+            # endregion debug-point B:remote-exception
 
     if remote_only and result is None:
         result = {
@@ -1089,6 +1179,27 @@ def analyze_single_article(config, article):
             result["source"] = "local_fallback"
             if not result.get("reason"):
                 result["reason"] = remote_error
+
+    # region debug-point B:analysis-final
+    try:
+        _dbg_report(
+            "B",
+            "analysis.final_result",
+            {
+                "article_id": article_id,
+                "account": str(article.get("account") or "")[:80],
+                "title": str(article.get("title") or "")[:120],
+                "status": str(result.get("status") or ""),
+                "reason": str(result.get("reason") or "")[:240],
+                "source": str(result.get("source") or ""),
+                "remote_error": remote_error[:240],
+                "summary_chars": len(str(result.get("summary") or "")),
+                "force_provider": force_provider or "",
+            },
+        )
+    except Exception:
+        pass
+    # endregion debug-point B:analysis-final
 
     preserve_existing_success_cache = _should_preserve_existing_success_cache(
         force_provider,
@@ -1430,7 +1541,7 @@ def _resolve_need_login_asset_url(config, raw_url) -> str:
 def _analysis_page_style_lines():
     return [
         "html{background:#ffffff;}",
-        "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;max-width:960px;margin:0 auto;padding:20px;line-height:1.5;background:#ffffff;color:#24292f;}",
+        "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif;max-width:960px;margin:0 auto;padding:20px;line-height:1.5;background:#ffffff;color:#24292f;overflow-wrap:anywhere;word-break:break-word;}",
         "h1{margin:0 0 16px 0;}",
         "h2{margin:24px 0 12px 0;padding-bottom:6px;border-bottom:1px solid #eee;}",
         ".subtitle{color:#666;font-size:12px;margin:-6px 0 18px 0;}",
@@ -1438,17 +1549,19 @@ def _analysis_page_style_lines():
         ".directory-title{font-weight:600;margin-bottom:10px;}",
         ".directory-group{margin-top:12px;}",
         ".directory-group-title{font-size:13px;font-weight:600;color:#57606a;margin-bottom:8px;}",
-        ".directory-list{display:flex;flex-wrap:wrap;gap:8px 10px;}",
-        ".directory-link{display:inline-block;padding:4px 10px;border-radius:999px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;}",
+        ".directory-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}",
+        ".directory-link{display:block;padding:12px 14px;border-radius:12px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;line-height:1.5;}",
         ".directory-link:hover{text-decoration:none;background:#f0f7ff;}",
         ".account-meta{color:#666;font-weight:400;font-size:12px;margin-left:8px;}",
         ".back-link{display:inline-block;margin-bottom:12px;color:#0969da;text-decoration:none;font-size:13px;}",
         ".back-link:hover{text-decoration:underline;}",
-        ".item{padding:10px 0;border-bottom:1px dashed #eee;}",
-        ".title{font-weight:600;}",
+        ".item{padding:14px 0;border-bottom:1px dashed #eee;}",
+        ".title{font-weight:600;line-height:1.6;}",
+        ".title a{color:inherit;text-decoration:none;}",
+        ".title a:hover{text-decoration:underline;}",
         ".meta{color:#666;font-size:12px;margin-top:4px;}",
-        ".actions{display:flex;align-items:center;gap:10px;margin-top:8px;}",
-        ".reanalyze-button{border:1px solid #d0d7de;background:#f6f8fa;border-radius:8px;padding:4px 10px;cursor:pointer;font-size:12px;}",
+        ".actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;}",
+        ".reanalyze-button{border:1px solid #d0d7de;background:#f6f8fa;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:12px;}",
         ".reanalyze-button[disabled]{cursor:not-allowed;opacity:0.55;}",
         ".reanalyze-status{color:#666;font-size:12px;}",
         ".reanalyze-button.is-busy{opacity:0.75;cursor:progress;}",
@@ -1472,6 +1585,18 @@ def _analysis_page_style_lines():
         ".history-title{margin-top:20px;font-weight:600;color:#24292f;}",
         "details{margin-top:10px;}",
         "summary{cursor:pointer;color:#444;}",
+        "img{max-width:100%;height:auto;}",
+        "@media (max-width: 640px){",
+        "body{max-width:none;padding:16px 12px 28px;}",
+        ".subtitle{margin:0 0 14px 0;line-height:1.6;}",
+        ".directory{padding:12px;}",
+        ".directory-list{grid-template-columns:1fr;}",
+        ".directory-link{display:block;padding:12px 14px;border-radius:12px;}",
+        ".actions{align-items:stretch;flex-direction:column;}",
+        ".reanalyze-button{width:100%;min-height:40px;}",
+        ".reanalyze-status{display:block;min-height:20px;}",
+        "summary{padding:6px 0;}",
+        "}",
     ]
 
 
@@ -1484,6 +1609,11 @@ def _directory_fetch_style_lines():
         ".fetch-latest-status{color:#57606a;font-size:12px;}",
         ".fetch-latest-status.is-success{color:#1a7f37;}",
         ".fetch-latest-status.is-error{color:#cf222e;}",
+        "@media (max-width: 640px){",
+        ".directory-actions{align-items:stretch;flex-direction:column;}",
+        ".fetch-latest-button{width:100%;min-height:42px;}",
+        ".fetch-latest-status{width:100%;line-height:1.6;}",
+        "}",
     ]
 
 
@@ -1493,6 +1623,7 @@ def _render_page_start(title: str, extra_style_lines=None):
         '<html lang="zh-CN">',
         "<head>",
         '<meta charset="utf-8" />',
+        '<meta name="viewport" content="width=device-width, initial-scale=1" />',
         '<meta name="color-scheme" content="light" />',
         f"<title>{html_escape(title)}</title>",
         "<style>",
