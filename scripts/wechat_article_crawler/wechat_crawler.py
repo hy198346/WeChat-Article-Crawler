@@ -1022,6 +1022,24 @@ def _pending_async_analysis_payload(kind="analysis"):
     return {"status": "pending", "reason": "scheduled_async", "kind": kind}
 
 
+def _analysis_payload_from_enqueue_result(result, kind="single_article"):
+    payload_kind = str(kind or "analysis").strip() or "analysis"
+    status = str((result or {}).get("status") or "").strip()
+    if status in ("scheduled", "deduped", "revived"):
+        return _pending_async_analysis_payload(payload_kind)
+    reason = str((result or {}).get("reason") or status or "enqueue_failed").strip() or "enqueue_failed"
+    return {"status": "error", "reason": reason, "kind": payload_kind}
+
+
+def _analysis_payload_from_async_schedule_result(result, kind="analysis"):
+    payload_kind = str(kind or "analysis").strip() or "analysis"
+    status = str((result or {}).get("status") or "").strip()
+    if status == "scheduled":
+        return _pending_async_analysis_payload(payload_kind)
+    reason = str((result or {}).get("reason") or status or "async_schedule_failed").strip() or "async_schedule_failed"
+    return {"status": "error", "reason": reason, "kind": payload_kind}
+
+
 def _async_jobs_dir() -> Path:
     path = OUTPUT_ROOT / "async_jobs"
     path.mkdir(parents=True, exist_ok=True)
@@ -1417,12 +1435,20 @@ def _run_async_job_file(job_file):
                 remove_job_file = False
             return
         if job_type == "batch_analysis_pipeline":
-            _run_batch_analysis_pipeline(
+            batch_result = _run_batch_analysis_pipeline(
                 payload.get("config"),
                 payload.get("changed_articles") or [],
                 payload.get("per_account_payloads") or [],
                 payload.get("headers") or {},
             )
+            if (
+                isinstance(batch_result, dict)
+                and str(batch_result.get("status") or "").strip() == "pending"
+                and str(batch_result.get("kind") or "").strip() == "batch_summary"
+            ):
+                job["last_result"] = batch_result
+                _rewrite_async_job_file(job_path, job)
+                remove_job_file = False
             return
         raise ValueError(f"unsupported_async_job_type:{job_type}")
     finally:
@@ -2173,6 +2199,27 @@ def _resolve_batch_fetched_article(source_by_key, article, headers):
     return fetched
 
 
+def _load_cached_batch_article_analysis(config, article):
+    if not isinstance(article, dict):
+        return None
+    article_id = _normalize_article_id(article.get("article_id"))
+    if not article_id:
+        try:
+            article_id = build_article_id(article)
+        except Exception:
+            article_id = ""
+    if not article_id:
+        return None
+    cached = _load_cached_analysis_by_article_id(config, article_id)
+    if not isinstance(cached, dict):
+        return None
+    cached_status = str(cached.get("status") or "").strip()
+    if not cached_status:
+        return None
+    merged, _ = _merge_fetched_fields_into_analysis(dict(cached), article)
+    return merged
+
+
 def _build_batch_ollama_only_config(config):
     cfg = dict(config or {})
     cfg["analysis_force_provider"] = "ollama"
@@ -2214,6 +2261,21 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                 and str(existing_analysis.get("status") or "").strip() == "pending"
                 and str(existing_analysis.get("kind") or "").strip() == "single_article"
             ):
+                cached_analysis = _load_cached_batch_article_analysis(single_article_config, article)
+                if cached_analysis:
+                    analysis = cached_analysis
+                    article["analysis"] = analysis
+                    analysis_items.append(
+                        {
+                            "status": analysis.get("status"),
+                            "account": article.get("account"),
+                            "title": article.get("title"),
+                            "topic": analysis.get("topic"),
+                            "core_points": analysis.get("core_points"),
+                            "summary": analysis.get("summary"),
+                        }
+                    )
+                    continue
                 has_pending_single_article_queue = True
                 article["analysis"] = existing_analysis
                 continue
@@ -2456,12 +2518,39 @@ def run_push_latest_all(
         analysis_cfg = get_analysis_config(config)
         if push and analysis_cfg.get("analysis_enabled"):
             source_by_key = _collect_batch_source_map(per_account_payloads)
+            enqueue_payloads = []
             for article in changed_articles:
-                article["analysis"] = _pending_async_analysis_payload("single_article")
                 fetched = _resolve_batch_fetched_article(source_by_key, article, headers)
                 if fetched:
-                    _enqueue_single_article_analysis_job(config, dict(fetched), refresh_index=False)
-            batch_analysis = _pending_async_analysis_payload("batch_summary")
+                    enqueue_result = _enqueue_single_article_analysis_job(config, dict(fetched), refresh_index=False)
+                else:
+                    enqueue_result = {"status": "error", "reason": "missing_article_body"}
+                article["analysis"] = _analysis_payload_from_enqueue_result(enqueue_result, "single_article")
+                enqueue_payloads.append(article["analysis"])
+            if enqueue_payloads and all(str(item.get("status") or "").strip() == "pending" for item in enqueue_payloads):
+                schedule_result = _schedule_async_job(
+                    "push_latest_all_analysis",
+                    _run_batch_analysis_pipeline,
+                    config,
+                    [dict(article) for article in changed_articles],
+                    [dict(payload) for payload in per_account_payloads],
+                    dict(headers),
+                )
+                batch_analysis = _analysis_payload_from_async_schedule_result(schedule_result, "batch_summary")
+            else:
+                first_error = next(
+                    (
+                        item
+                        for item in enqueue_payloads
+                        if str((item or {}).get("status") or "").strip() != "pending"
+                    ),
+                    None,
+                )
+                batch_analysis = {
+                    "status": "error",
+                    "reason": str((first_error or {}).get("reason") or "single_article_enqueue_failed"),
+                    "kind": "batch_summary",
+                }
             # region debug-point D:push-latest-all-scheduled
             try:
                 _dbg_report(
@@ -2476,14 +2565,6 @@ def run_push_latest_all(
             except Exception:
                 pass
             # endregion debug-point D:push-latest-all-scheduled
-            _schedule_async_job(
-                "push_latest_all_analysis",
-                _run_batch_analysis_pipeline,
-                config,
-                [dict(article) for article in changed_articles],
-                [dict(payload) for payload in per_account_payloads],
-                dict(headers),
-            )
         else:
             batch_analysis = _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads, headers)
 
@@ -2559,8 +2640,8 @@ def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_mark
         push_result = push_article_to_serverchan(config, payload, override_sendkey=serverchan_sendkey)
         payload["serverchan"] = push_result
         if get_analysis_config(config).get("analysis_enabled"):
-            payload["analysis"] = _pending_async_analysis_payload("single_article")
-            _enqueue_single_article_analysis_job(config, dict(fetched))
+            enqueue_result = _enqueue_single_article_analysis_job(config, dict(fetched))
+            payload["analysis"] = _analysis_payload_from_enqueue_result(enqueue_result, "single_article")
         else:
             payload["analysis"] = None
     else:
@@ -2597,8 +2678,8 @@ def run_extract_from_url(article_url, account_name=None, save_markdown=False, ou
         push_result = push_article_to_serverchan(config, payload, override_sendkey=serverchan_sendkey)
         payload["serverchan"] = push_result
         if get_analysis_config(config).get("analysis_enabled"):
-            payload["analysis"] = _pending_async_analysis_payload("single_article")
-            _enqueue_single_article_analysis_job(config, dict(fetched))
+            enqueue_result = _enqueue_single_article_analysis_job(config, dict(fetched))
+            payload["analysis"] = _analysis_payload_from_enqueue_result(enqueue_result, "single_article")
         else:
             payload["analysis"] = None
     else:

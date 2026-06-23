@@ -5477,6 +5477,43 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
         finally:
             wechat_crawler._attach_single_article_analysis = old_attach
 
+    def test_run_async_job_file_keeps_batch_followup_job_when_summary_is_still_pending(self):
+        old_batch = getattr(wechat_crawler, "_run_batch_analysis_pipeline", None)
+        try:
+            wechat_crawler._run_batch_analysis_pipeline = (
+                lambda config, changed_articles, per_account_payloads, headers: {
+                    "status": "pending",
+                    "reason": "waiting_single_article_queue",
+                    "kind": "batch_summary",
+                }
+            )
+
+            with tempfile.TemporaryDirectory() as d:
+                job_path = Path(d) / "batch-job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "push_latest_all_analysis",
+                            "job_type": "batch_analysis_pipeline",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "changed_articles": [],
+                                "per_account_payloads": [],
+                                "headers": {},
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertTrue(job_path.exists())
+        finally:
+            if old_batch is not None:
+                wechat_crawler._run_batch_analysis_pipeline = old_batch
+
     def test_run_async_job_file_rewrites_same_job_for_recoverable_failure_attempt_1_to_2(self):
         spawned = []
 
@@ -6025,6 +6062,45 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
                 wechat_crawler.analyze_single_article = old_analyze
             if old_persist is not None:
                 wechat_crawler.persist_single_analysis_outputs = old_persist
+
+    def test_run_extract_from_url_does_not_report_false_pending_when_enqueue_fails(self):
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_article_to_serverchan
+        old_enqueue = getattr(wechat_crawler, "_enqueue_single_article_analysis_job", None)
+        try:
+            wechat_crawler.fetch_article_markdown = lambda article, headers, account_name=None: {
+                "article_id": "aid-enqueue-fail",
+                "account": "测试号",
+                "title": "标题",
+                "date": "2026-06-11",
+                "published_at": "2026-06-11 21:30",
+                "url": article["link"],
+                "markdown": "# 标题\n\n正文",
+            }
+            wechat_crawler.push_article_to_serverchan = lambda *args, **kwargs: {"ok": True}
+            wechat_crawler._enqueue_single_article_analysis_job = (
+                lambda config, fetched, refresh_index=True, force_reanalyze=False: {
+                    "status": "error",
+                    "reason": "disk_full",
+                }
+            )
+
+            payload = wechat_crawler.run_extract_from_url(
+                "https://mp.weixin.qq.com/s/test-enqueue-fail",
+                account_name="测试号",
+                save_markdown=False,
+                push=True,
+                config={"analysis_enabled": True},
+            )
+
+            self.assertEqual(payload["analysis"]["status"], "error")
+            self.assertEqual(payload["analysis"]["reason"], "disk_full")
+            self.assertEqual(payload["analysis"]["kind"], "single_article")
+        finally:
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_article_to_serverchan = old_push
+            if old_enqueue is not None:
+                wechat_crawler._enqueue_single_article_analysis_job = old_enqueue
 
     def test_run_extract_latest_attaches_analysis(self):
         persist_calls = []
@@ -6658,6 +6734,63 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             if old_schedule is not None:
                 wechat_crawler._schedule_async_job = old_schedule
 
+    def test_run_push_latest_all_does_not_report_false_pending_when_enqueue_fails(self):
+        scheduled = []
+
+        old_load_accounts = wechat_crawler.load_accounts_list
+        old_extract = wechat_crawler._extract_latest_payload_for_account
+        old_push = wechat_crawler.push_articles_to_serverchan
+        old_enqueue = getattr(wechat_crawler, "_enqueue_single_article_analysis_job", None)
+        old_schedule = getattr(wechat_crawler, "_schedule_async_job", None)
+        old_save_md = wechat_crawler.save_url_to_md
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.load_accounts_list = lambda config, accounts_file_override=None: [
+                    {"name": "号A", "fakeid": "fidA", "group": "测试分组"}
+                ]
+                wechat_crawler._extract_latest_payload_for_account = lambda **kwargs: {
+                    "account": "号A",
+                    "fakeid": "fidA",
+                    "title": "A 文",
+                    "date": "2026-06-11",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/a",
+                    "_raw_article": {"title": "A 文", "link": "https://mp.weixin.qq.com/s/a"},
+                }
+                wechat_crawler.push_articles_to_serverchan = lambda *args, **kwargs: {"ok": True}
+                wechat_crawler._enqueue_single_article_analysis_job = (
+                    lambda config, fetched, refresh_index=True, force_reanalyze=False: {
+                        "status": "error",
+                        "reason": "disk_full",
+                    }
+                )
+                wechat_crawler._schedule_async_job = (
+                    lambda name, func, *args, **kwargs: scheduled.append(name) or {"status": "scheduled", "name": name}
+                )
+                wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
+
+                payload = wechat_crawler.run_push_latest_all(
+                    {"token": "t", "cookie": "c", "analysis_enabled": True},
+                    push=True,
+                    save_markdown=False,
+                    push_state_file=str(Path(d) / "push_state.json"),
+                )
+
+                self.assertEqual(payload["articles"][0]["analysis"]["status"], "error")
+                self.assertEqual(payload["articles"][0]["analysis"]["reason"], "disk_full")
+                self.assertEqual(payload["batch_analysis"]["status"], "error")
+                self.assertEqual(payload["batch_analysis"]["kind"], "batch_summary")
+                self.assertEqual(scheduled, [])
+        finally:
+            wechat_crawler.load_accounts_list = old_load_accounts
+            wechat_crawler._extract_latest_payload_for_account = old_extract
+            wechat_crawler.push_articles_to_serverchan = old_push
+            if old_enqueue is not None:
+                wechat_crawler._enqueue_single_article_analysis_job = old_enqueue
+            if old_schedule is not None:
+                wechat_crawler._schedule_async_job = old_schedule
+            wechat_crawler.save_url_to_md = old_save_md
+
     def test_run_push_latest_all_enqueues_single_article_for_fakeid_payload(self):
         enqueued = []
         fetched_calls = []
@@ -6968,6 +7101,77 @@ class TestBatchSummaryOutput(unittest.TestCase):
         finally:
             if old_attach is not None:
                 wechat_crawler._attach_single_article_analysis = old_attach
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_refresh is not None:
+                wechat_crawler._refresh_analysis_index_html = old_refresh
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
+
+    def test_run_batch_analysis_pipeline_uses_cached_analysis_for_pending_articles(self):
+        captured = {"attach_calls": 0, "batch_items": None}
+
+        old_attach = getattr(wechat_crawler, "_attach_single_article_analysis", None)
+        old_load_cached = getattr(wechat_crawler, "_load_cached_analysis_by_article_id", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_refresh = getattr(wechat_crawler, "_refresh_analysis_index_html", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
+        try:
+            wechat_crawler._attach_single_article_analysis = (
+                lambda *args, **kwargs: captured.__setitem__("attach_calls", captured["attach_calls"] + 1)
+                or {"status": "ok", "summary": "不应走这里"}
+            )
+            wechat_crawler._load_cached_analysis_by_article_id = lambda config, article_id: {
+                "status": "ok",
+                "article_id": article_id,
+                "summary": "缓存单篇总结",
+                "topic": "缓存主题",
+                "core_points": ["缓存观点"],
+            }
+
+            def fake_batch(config, analyses, batch_id):
+                captured["batch_items"] = analyses
+                return {
+                    "status": "ok",
+                    "batch_id": batch_id,
+                    "summary": "批量汇总完成",
+                    "batch_focus": "情绪修复",
+                    "shared_themes": ["资金回流"],
+                    "priority_reads": ["A 文"],
+                }
+
+            wechat_crawler.summarize_analysis_batch = fake_batch
+            wechat_crawler._refresh_analysis_index_html = lambda config: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
+
+            result = wechat_crawler._run_batch_analysis_pipeline(
+                {"analysis_enabled": True},
+                [
+                    {
+                        "article_id": "aid-cached-1",
+                        "account": "号A",
+                        "title": "A 文",
+                        "url": "https://mp.weixin.qq.com/s/a",
+                        "fakeid": "fidA",
+                        "analysis": {
+                            "status": "pending",
+                            "reason": "scheduled_async",
+                            "kind": "single_article",
+                        },
+                    }
+                ],
+                [{"fakeid": "fidA"}],
+                {},
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(captured["attach_calls"], 0)
+            self.assertEqual(captured["batch_items"][0]["summary"], "缓存单篇总结")
+        finally:
+            if old_attach is not None:
+                wechat_crawler._attach_single_article_analysis = old_attach
+            if old_load_cached is not None:
+                wechat_crawler._load_cached_analysis_by_article_id = old_load_cached
             if old_batch is not None:
                 wechat_crawler.summarize_analysis_batch = old_batch
             if old_refresh is not None:
