@@ -6658,6 +6658,81 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             if old_schedule is not None:
                 wechat_crawler._schedule_async_job = old_schedule
 
+    def test_run_push_latest_all_enqueues_single_article_for_fakeid_payload(self):
+        enqueued = []
+        fetched_calls = []
+
+        old_load_accounts = wechat_crawler.load_accounts_list
+        old_extract = wechat_crawler._extract_latest_payload_for_account
+        old_fetch = wechat_crawler.fetch_article_markdown
+        old_push = wechat_crawler.push_articles_to_serverchan
+        old_enqueue = getattr(wechat_crawler, "_enqueue_single_article_analysis_job", None)
+        old_schedule = getattr(wechat_crawler, "_schedule_async_job", None)
+        old_save_md = wechat_crawler.save_url_to_md
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.load_accounts_list = lambda config, accounts_file_override=None: [
+                    {"name": "号A", "fakeid": "fidA", "group": "测试分组"}
+                ]
+                wechat_crawler._extract_latest_payload_for_account = lambda **kwargs: {
+                    "account": "号A",
+                    "fakeid": "fidA",
+                    "title": "A 文",
+                    "date": "2026-06-11",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/a",
+                    "_raw_article": {"title": "A 文", "link": "https://mp.weixin.qq.com/s/a"},
+                }
+
+                def fake_fetch(article, headers, account_name=None):
+                    fetched_calls.append({"article": dict(article), "account_name": account_name})
+                    return {
+                        "article_id": "aid-fidA",
+                        "account": "号A",
+                        "title": "A 文",
+                        "date": "2026-06-11",
+                        "published_at": "2026-06-11 21:30",
+                        "url": article["link"],
+                        "markdown": "# A 文\n\n正文",
+                    }
+
+                wechat_crawler.fetch_article_markdown = fake_fetch
+                wechat_crawler.push_articles_to_serverchan = lambda *args, **kwargs: {"ok": True}
+                wechat_crawler._enqueue_single_article_analysis_job = (
+                    lambda config, fetched, refresh_index=True, force_reanalyze=False: enqueued.append(
+                        {
+                            "fetched": dict(fetched),
+                            "refresh_index": refresh_index,
+                            "force_reanalyze": force_reanalyze,
+                        }
+                    )
+                    or {"status": "scheduled"}
+                )
+                wechat_crawler._schedule_async_job = lambda *args, **kwargs: {"status": "scheduled"}
+                wechat_crawler.save_url_to_md = lambda *args, **kwargs: None
+
+                wechat_crawler.run_push_latest_all(
+                    {"token": "t", "cookie": "c", "analysis_enabled": True},
+                    push=True,
+                    save_markdown=False,
+                    push_state_file=str(Path(d) / "push_state.json"),
+                )
+
+                self.assertEqual(len(enqueued), 1)
+                self.assertEqual(enqueued[0]["fetched"]["article_id"], "aid-fidA")
+                self.assertFalse(enqueued[0]["refresh_index"])
+                self.assertEqual(len(fetched_calls), 1)
+        finally:
+            wechat_crawler.load_accounts_list = old_load_accounts
+            wechat_crawler._extract_latest_payload_for_account = old_extract
+            wechat_crawler.fetch_article_markdown = old_fetch
+            wechat_crawler.push_articles_to_serverchan = old_push
+            if old_enqueue is not None:
+                wechat_crawler._enqueue_single_article_analysis_job = old_enqueue
+            if old_schedule is not None:
+                wechat_crawler._schedule_async_job = old_schedule
+            wechat_crawler.save_url_to_md = old_save_md
+
     def test_run_push_latest_all_pushes_articles_with_explicit_article_id(self):
         captured = {}
 
@@ -6836,6 +6911,70 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
 
 
 class TestBatchSummaryOutput(unittest.TestCase):
+    def test_run_batch_analysis_pipeline_skips_single_article_rerun_for_pending_articles(self):
+        captured = {"attach_calls": 0, "batch_calls": 0}
+
+        old_attach = getattr(wechat_crawler, "_attach_single_article_analysis", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_refresh = getattr(wechat_crawler, "_refresh_analysis_index_html", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
+        try:
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                captured["attach_calls"] += 1
+                return {"status": "ok", "summary": "不应被调用"}
+
+            def fake_batch(config, analyses, batch_id):
+                captured["batch_calls"] += 1
+                return {"status": "ok", "batch_id": batch_id, "summary": "不应生成"}
+
+            wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler.summarize_analysis_batch = fake_batch
+            wechat_crawler._refresh_analysis_index_html = lambda config: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
+
+            result = wechat_crawler._run_batch_analysis_pipeline(
+                {"analysis_enabled": True},
+                [
+                    {
+                        "account": "号A",
+                        "title": "A 文",
+                        "url": "https://mp.weixin.qq.com/s/a",
+                        "fakeid": "fidA",
+                        "analysis": {
+                            "status": "pending",
+                            "reason": "scheduled_async",
+                            "kind": "single_article",
+                        },
+                    }
+                ],
+                [
+                    {
+                        "fakeid": "fidA",
+                        "_fetched_article": {
+                            "account": "号A",
+                            "title": "A 文",
+                            "published_at": "2026-06-22 09:00",
+                            "url": "https://mp.weixin.qq.com/s/a",
+                            "markdown": "# A 文\n\n正文",
+                        },
+                    }
+                ],
+                {},
+            )
+
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(captured["attach_calls"], 0)
+            self.assertEqual(captured["batch_calls"], 0)
+        finally:
+            if old_attach is not None:
+                wechat_crawler._attach_single_article_analysis = old_attach
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_refresh is not None:
+                wechat_crawler._refresh_analysis_index_html = old_refresh
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
+
     def test_run_batch_analysis_pipeline_keeps_remote_chain_for_single_article_analysis(self):
         captured = {"attach_configs": [], "batch_configs": []}
 

@@ -2149,6 +2149,30 @@ def _collect_batch_source_map(per_account_payloads):
     return source_by_key
 
 
+def _resolve_batch_source_for_article(source_by_key, article):
+    source = {}
+    if isinstance(source_by_key, dict):
+        source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
+    return source if isinstance(source, dict) else {}
+
+
+def _resolve_batch_fetched_article(source_by_key, article, headers):
+    source = _resolve_batch_source_for_article(source_by_key, article)
+    fetched = source.get("_fetched_article")
+    if fetched:
+        return fetched
+    raw = source.get("_raw_article") or article.get("_raw_article")
+    if not raw:
+        return None
+    try:
+        fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
+    except Exception:
+        fetched = None
+    if fetched and isinstance(source, dict):
+        source["_fetched_article"] = fetched
+    return fetched
+
+
 def _build_batch_ollama_only_config(config):
     cfg = dict(config or {})
     cfg["analysis_force_provider"] = "ollama"
@@ -2182,18 +2206,24 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
     if analysis_cfg.get("analysis_enabled"):
         single_article_config = dict(config or {})
         batch_config = _build_batch_ollama_only_config(config)
+        has_pending_single_article_queue = False
         for article in changed_articles:
-            source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
-            fetched = source.get("_fetched_article")
-            if not fetched:
-                raw = source.get("_raw_article")
-                if raw:
-                    try:
-                        fetched = fetch_article_markdown(raw, headers, account_name=article.get("account"))
-                    except Exception:
-                        fetched = None
+            existing_analysis = article.get("analysis") if isinstance(article, dict) else None
+            if (
+                isinstance(existing_analysis, dict)
+                and str(existing_analysis.get("status") or "").strip() == "pending"
+                and str(existing_analysis.get("kind") or "").strip() == "single_article"
+            ):
+                has_pending_single_article_queue = True
+                article["analysis"] = existing_analysis
+                continue
+            fetched = _resolve_batch_fetched_article(source_by_key, article, headers)
             if fetched:
-                analysis = _attach_single_article_analysis(single_article_config, fetched, refresh_index=False)
+                analysis = _attach_single_article_analysis(
+                    single_article_config,
+                    fetched,
+                    refresh_index=False,
+                )
             else:
                 analysis = {"status": "skipped", "reason": "missing_article_body"}
             article["analysis"] = analysis
@@ -2207,6 +2237,8 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                     "summary": analysis.get("summary"),
                 }
             )
+        if has_pending_single_article_queue and not analysis_items:
+            return _pending_async_analysis_payload("batch_summary")
         # region debug-point C:batch-pipeline-items
         try:
             status_counts = {}
@@ -2426,8 +2458,7 @@ def run_push_latest_all(
             source_by_key = _collect_batch_source_map(per_account_payloads)
             for article in changed_articles:
                 article["analysis"] = _pending_async_analysis_payload("single_article")
-                source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
-                fetched = source.get("_fetched_article")
+                fetched = _resolve_batch_fetched_article(source_by_key, article, headers)
                 if fetched:
                     _enqueue_single_article_analysis_job(config, dict(fetched), refresh_index=False)
             batch_analysis = _pending_async_analysis_payload("batch_summary")
