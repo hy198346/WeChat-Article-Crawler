@@ -1360,6 +1360,48 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
     return {"action": "requeued", "retry_state": retry_state, "delay_seconds": delay_seconds}
 
 
+def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
+    if not (
+        isinstance(batch_result, dict)
+        and str(batch_result.get("status") or "").strip() == "pending"
+        and str(batch_result.get("kind") or "").strip() == "batch_summary"
+    ):
+        return {"action": "done"}
+    retry_state = _normalize_async_retry_state(job.get("retry_state"))
+    current_attempt = retry_state.get("attempt") or 1
+    delay_seconds = _next_async_retry_delay_seconds(current_attempt)
+    now_text = _async_retry_time_text()
+    retry_state["attempt"] = int(current_attempt) + 1
+    retry_state["retry_mode"] = str(retry_state.get("retry_mode") or "until_success").strip() or "until_success"
+    retry_state["first_failed_at"] = retry_state.get("first_failed_at") or now_text
+    retry_state["last_failed_at"] = now_text
+    retry_state["last_reason"] = str(batch_result.get("reason") or "waiting_single_article_queue").strip() or "waiting_single_article_queue"
+    retry_state["next_retry_at"] = _async_retry_time_text(time.time() + delay_seconds)
+    retry_state["stop_reason"] = ""
+    retry_state["notified"] = False
+    job["retry_state"] = retry_state
+    job["last_result"] = dict(batch_result)
+    _rewrite_async_job_file(job_path, job)
+    try:
+        _spawn_async_job_process(job_path)
+    except Exception as exc:
+        print(
+            f"[{_ts_now()}] WARN async batch summary respawn failed: "
+            f"{type(exc).__name__}:{exc}"
+        )
+        return {
+            "action": "requeued",
+            "retry_state": retry_state,
+            "delay_seconds": delay_seconds,
+            "spawn_error": f"{type(exc).__name__}:{exc}",
+        }
+    print(
+        f"[{_ts_now()}] async batch summary requeued "
+        f"reason={retry_state.get('last_reason') or ''} attempt={retry_state.get('attempt')}"
+    )
+    return {"action": "requeued", "retry_state": retry_state, "delay_seconds": delay_seconds}
+
+
 def _serialize_async_job(name, func, args, kwargs):
     kwargs = dict(kwargs or {})
     if func is _attach_single_article_analysis:
@@ -1435,19 +1477,15 @@ def _run_async_job_file(job_file):
                 remove_job_file = False
             return
         if job_type == "batch_analysis_pipeline":
+            _wait_until_async_retry_due(job)
             batch_result = _run_batch_analysis_pipeline(
                 payload.get("config"),
                 payload.get("changed_articles") or [],
                 payload.get("per_account_payloads") or [],
                 payload.get("headers") or {},
             )
-            if (
-                isinstance(batch_result, dict)
-                and str(batch_result.get("status") or "").strip() == "pending"
-                and str(batch_result.get("kind") or "").strip() == "batch_summary"
-            ):
-                job["last_result"] = batch_result
-                _rewrite_async_job_file(job_path, job)
+            outcome = _handle_async_batch_summary_result(job, batch_result, job_path)
+            if outcome.get("action") == "requeued":
                 remove_job_file = False
             return
         raise ValueError(f"unsupported_async_job_type:{job_type}")
@@ -2299,8 +2337,13 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                     "summary": analysis.get("summary"),
                 }
             )
-        if has_pending_single_article_queue and not analysis_items:
-            return _pending_async_analysis_payload("batch_summary")
+        if has_pending_single_article_queue:
+            return {
+                "status": "pending",
+                "reason": "waiting_single_article_queue",
+                "kind": "batch_summary",
+                "batch_id": batch_id,
+            }
         # region debug-point C:batch-pipeline-items
         try:
             status_counts = {}

@@ -5514,6 +5514,124 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if old_batch is not None:
                 wechat_crawler._run_batch_analysis_pipeline = old_batch
 
+    def test_run_async_job_file_requeues_pending_batch_followup_job_and_finishes_after_reconsume(self):
+        spawned = []
+        fake_now = {"value": 1_800_000_000.0}
+        batch_calls = []
+        load_state = {"ready": False}
+
+        old_output_root = wechat_crawler.OUTPUT_ROOT
+        old_time = wechat_crawler.time.time
+        old_sleep = wechat_crawler.time.sleep
+        old_spawn = getattr(wechat_crawler, "_spawn_async_job_process", None)
+        old_load_cached = getattr(wechat_crawler, "_load_cached_analysis_by_article_id", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_refresh = getattr(wechat_crawler, "_refresh_analysis_index_html", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
+        try:
+            class DummyProcess:
+                pid = 67890
+
+            def fake_spawn(job_path):
+                spawned.append(Path(job_path))
+                return DummyProcess()
+
+            def fake_sleep(seconds):
+                fake_now["value"] += seconds
+
+            def fake_load_cached(config, article_id):
+                if not load_state["ready"]:
+                    return None
+                return {
+                    "status": "ok",
+                    "article_id": article_id,
+                    "summary": "缓存补齐总结",
+                    "topic": "缓存主题",
+                    "core_points": ["缓存观点"],
+                }
+
+            def fake_batch(config, analyses, batch_id):
+                batch_calls.append(list(analyses))
+                return {
+                    "status": "ok",
+                    "batch_id": batch_id,
+                    "summary": "批量汇总完成",
+                    "batch_focus": "等待后完成",
+                    "shared_themes": ["队列消费完成"],
+                    "priority_reads": ["A 文"],
+                }
+
+            wechat_crawler.time.time = lambda: fake_now["value"]
+            wechat_crawler.time.sleep = fake_sleep
+            wechat_crawler._spawn_async_job_process = fake_spawn
+            wechat_crawler._load_cached_analysis_by_article_id = fake_load_cached
+            wechat_crawler.summarize_analysis_batch = fake_batch
+            wechat_crawler._refresh_analysis_index_html = lambda config: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
+
+            with tempfile.TemporaryDirectory() as d:
+                wechat_crawler.OUTPUT_ROOT = Path(d)
+                job_path = Path(d) / "batch-job.json"
+                job_path.write_text(
+                    json.dumps(
+                        {
+                            "name": "push_latest_all_analysis",
+                            "job_type": "batch_analysis_pipeline",
+                            "payload": {
+                                "config": {"analysis_enabled": True},
+                                "changed_articles": [
+                                    {
+                                        "article_id": "aid-batch-followup",
+                                        "account": "号A",
+                                        "title": "A 文",
+                                        "url": "https://mp.weixin.qq.com/s/a",
+                                        "analysis": {
+                                            "status": "pending",
+                                            "reason": "scheduled_async",
+                                            "kind": "single_article",
+                                        },
+                                    }
+                                ],
+                                "per_account_payloads": [{"fakeid": "fidA"}],
+                                "headers": {},
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertTrue(job_path.exists())
+                self.assertEqual(spawned, [job_path])
+                pending_job = json.loads(job_path.read_text(encoding="utf-8"))
+                retry_state = pending_job.get("retry_state") or {}
+                self.assertEqual(retry_state.get("attempt"), 2)
+                self.assertTrue(retry_state.get("next_retry_at"))
+                self.assertEqual(pending_job.get("last_result", {}).get("status"), "pending")
+
+                load_state["ready"] = True
+                wechat_crawler._run_async_job_file(str(job_path))
+
+                self.assertFalse(job_path.exists())
+                self.assertEqual(len(batch_calls), 1)
+                self.assertEqual(batch_calls[0][0]["summary"], "缓存补齐总结")
+        finally:
+            wechat_crawler.OUTPUT_ROOT = old_output_root
+            wechat_crawler.time.time = old_time
+            wechat_crawler.time.sleep = old_sleep
+            if old_spawn is not None:
+                wechat_crawler._spawn_async_job_process = old_spawn
+            if old_load_cached is not None:
+                wechat_crawler._load_cached_analysis_by_article_id = old_load_cached
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_refresh is not None:
+                wechat_crawler._refresh_analysis_index_html = old_refresh
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
+
     def test_run_async_job_file_rewrites_same_job_for_recoverable_failure_attempt_1_to_2(self):
         spawned = []
 
@@ -7167,6 +7285,87 @@ class TestBatchSummaryOutput(unittest.TestCase):
             self.assertEqual(result["status"], "ok")
             self.assertEqual(captured["attach_calls"], 0)
             self.assertEqual(captured["batch_items"][0]["summary"], "缓存单篇总结")
+        finally:
+            if old_attach is not None:
+                wechat_crawler._attach_single_article_analysis = old_attach
+            if old_load_cached is not None:
+                wechat_crawler._load_cached_analysis_by_article_id = old_load_cached
+            if old_batch is not None:
+                wechat_crawler.summarize_analysis_batch = old_batch
+            if old_refresh is not None:
+                wechat_crawler._refresh_analysis_index_html = old_refresh
+            if old_persist_batch is not None:
+                wechat_crawler.persist_batch_analysis_outputs = old_persist_batch
+
+    def test_run_batch_analysis_pipeline_does_not_emit_partial_summary_while_any_single_article_pending(self):
+        captured = {"attach_calls": 0, "batch_calls": 0}
+
+        old_attach = getattr(wechat_crawler, "_attach_single_article_analysis", None)
+        old_load_cached = getattr(wechat_crawler, "_load_cached_analysis_by_article_id", None)
+        old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
+        old_refresh = getattr(wechat_crawler, "_refresh_analysis_index_html", None)
+        old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
+        try:
+            wechat_crawler._attach_single_article_analysis = (
+                lambda *args, **kwargs: captured.__setitem__("attach_calls", captured["attach_calls"] + 1)
+                or {"status": "ok", "summary": "不应走这里"}
+            )
+
+            def fake_load_cached(config, article_id):
+                if article_id == "aid-ready":
+                    return {
+                        "status": "ok",
+                        "article_id": article_id,
+                        "summary": "已完成单篇",
+                        "topic": "已完成主题",
+                        "core_points": ["已完成观点"],
+                    }
+                return None
+
+            def fake_batch(config, analyses, batch_id):
+                captured["batch_calls"] += 1
+                return {"status": "ok", "summary": "不应生成部分汇总"}
+
+            wechat_crawler._load_cached_analysis_by_article_id = fake_load_cached
+            wechat_crawler.summarize_analysis_batch = fake_batch
+            wechat_crawler._refresh_analysis_index_html = lambda config: None
+            wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
+
+            result = wechat_crawler._run_batch_analysis_pipeline(
+                {"analysis_enabled": True},
+                [
+                    {
+                        "article_id": "aid-ready",
+                        "account": "号A",
+                        "title": "A 文",
+                        "url": "https://mp.weixin.qq.com/s/a",
+                        "analysis": {
+                            "status": "pending",
+                            "reason": "scheduled_async",
+                            "kind": "single_article",
+                        },
+                    },
+                    {
+                        "article_id": "aid-still-pending",
+                        "account": "号B",
+                        "title": "B 文",
+                        "url": "https://mp.weixin.qq.com/s/b",
+                        "analysis": {
+                            "status": "pending",
+                            "reason": "scheduled_async",
+                            "kind": "single_article",
+                        },
+                    },
+                ],
+                [{"fakeid": "fidA"}, {"fakeid": "fidB"}],
+                {},
+            )
+
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["kind"], "batch_summary")
+            self.assertEqual(result["reason"], "waiting_single_article_queue")
+            self.assertEqual(captured["batch_calls"], 0)
+            self.assertEqual(captured["attach_calls"], 0)
         finally:
             if old_attach is not None:
                 wechat_crawler._attach_single_article_analysis = old_attach
