@@ -45,7 +45,7 @@ playwright install chromium
 
 ### 2. 配置参数
 
-编辑 `config.json` 文件，填写必要参数。下面示例中的 AI 相关字段使用的是当前代码默认值：
+编辑 `config.json` 文件，填写必要参数。下面示例中的 AI 相关字段使用的是当前代码默认值；如果要启用 AI，可在保存后再把 `analysis_enabled` 改成 `true`：
 
 ```json
 {
@@ -54,7 +54,7 @@ playwright install chromium
     "min_file_size_kb": 3,
     "check_interval_minutes": 60,
     "retry_interval_minutes": 5,
-    "analysis_enabled": true,
+    "analysis_enabled": false,
     "analysis_push_batch": true,
     "analysis_base_url": "http://192.168.9.158:11434",
     "analysis_model": "qwen2.5-coder:14b-cpu",
@@ -255,7 +255,7 @@ output/article_analysis/index.html
 4. 如果页面通过公网域名访问，确认该域名已把 `analysis_reanalyze_path` 代理到本地重解读服务
 5. 打开聚合页并点击“重新解读”验证链路
 
-发布或修改重解读相关链路后，若页面入口通过 `analysis-static` 对外提供，需同时重启这两个 `launchd` 服务，避免公网入口继续跑旧代码：
+发布或修改重解读相关链路后，若页面入口通过 `analysis-static` 对外提供，需同时重启这三个 `launchd` 服务，避免队列 worker、聚合页入口或重解读接口继续跑旧代码：
 
 ```bash
 bin/restart_analysis_services.sh
@@ -263,8 +263,9 @@ bin/restart_analysis_services.sh
 
 说明：
 
-- 默认顺序重启 `com.wechat.articlecrawler.analysis-static`
-- 再重启 `com.wechat.articlecrawler.reanalyze-api`
+- 默认顺序重启 `com.wechat.articlecrawler.analysis-queue`
+- 再重启 `com.wechat.articlecrawler.analysis-static`
+- 最后重启 `com.wechat.articlecrawler.reanalyze-api`
 - 如需切换 `launchd` domain，可设置 `WECHAT_LAUNCHD_DOMAIN`，例如 `system`
 
 ## 自动解读队列
@@ -326,18 +327,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\install_scheduled_task
 
 ## macOS：launchd 定时任务 + Watchdog
 
-项目内置了两份 launchd 配置（见 `config/launchd/`），用于：
+项目内置了三份 launchd 配置（见 `config/launchd/`），用于：
 
 - 主任务：`com.wechat.articlecrawler.runproject`（按固定时刻运行 `bin/run_project_launchd.sh`）
 - Watchdog：`com.wechat.articlecrawler.watchdog`（每 10 分钟运行一次 `scripts/wechat_article_crawler/watchdog.py`，检查系统/任务状态，并在异常时自动修复 + Server酱告警）
+- 自动解读队列：`com.wechat.articlecrawler.analysis-queue`（每小时 `05/35` 分运行 `bin/run_analysis_queue_launchd.sh`，依次消费单篇队列和 batch follow-up 队列）
 
 安装方式（以当前用户 LaunchAgent 为例）：
 
 1. 将 `config/launchd/*.plist` 复制到 `~/Library/LaunchAgents/`（并把 plist 里的绝对路径改成你本机的项目路径）。
-2. 加载主任务与 watchdog：
+2. 加载主任务、自动解读队列与 watchdog：
 
 ```bash
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.runproject.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.watchdog.plist
 ```
 

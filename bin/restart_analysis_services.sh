@@ -3,6 +3,7 @@ set -euo pipefail
 
 LAUNCHD_DOMAIN="${WECHAT_LAUNCHD_DOMAIN:-gui/$(id -u)}"
 SERVICES=(
+  "com.wechat.articlecrawler.analysis-queue"
   "com.wechat.articlecrawler.analysis-static"
   "com.wechat.articlecrawler.reanalyze-api"
 )

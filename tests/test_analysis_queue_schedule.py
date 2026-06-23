@@ -47,6 +47,15 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn('"analysis_model": "qwen2.5-coder:14b-cpu"', content)
         self.assertIn("| analysis_base_url | 可选 | http://192.168.9.158:11434 |", content)
         self.assertIn("| analysis_model | 可选 | qwen2.5-coder:14b-cpu |", content)
+        self.assertIn("默认顺序重启 `com.wechat.articlecrawler.analysis-queue`", content)
+        self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist", content)
+
+    def test_config_json_example_aligns_with_code_defaults(self):
+        example_path = REPO_ROOT / "config.json.example"
+        content = example_path.read_text(encoding="utf-8")
+        self.assertIn('"analysis_enabled": false', content)
+        self.assertIn('"analysis_base_url": "http://192.168.9.158:11434"', content)
+        self.assertIn('"analysis_model": "qwen2.5-coder:14b-cpu"', content)
 
     def test_spec_documents_batch_followup_drain_behavior(self):
         spec_path = REPO_ROOT / "docs/superpowers/specs/2026-06-23-wechat-analysis-queue-design.md"

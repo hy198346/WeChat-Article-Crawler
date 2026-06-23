@@ -42,7 +42,7 @@ class TestRestartAnalysisServicesScript(unittest.TestCase):
                 calls = [line.strip() for line in log_path.read_text(encoding="utf-8").splitlines() if line.strip()]
             return result, calls
 
-    def test_restart_script_kickstarts_analysis_static_then_reanalyze_api(self):
+    def test_restart_script_kickstarts_analysis_queue_then_analysis_static_then_reanalyze_api(self):
         result, calls = self._run_script()
 
         self.assertEqual(result.returncode, 0, msg=result.stderr or result.stdout)
@@ -50,6 +50,7 @@ class TestRestartAnalysisServicesScript(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                f"kickstart -k gui/{uid}/com.wechat.articlecrawler.analysis-queue",
                 f"kickstart -k gui/{uid}/com.wechat.articlecrawler.analysis-static",
                 f"kickstart -k gui/{uid}/com.wechat.articlecrawler.reanalyze-api",
             ],
@@ -62,6 +63,7 @@ class TestRestartAnalysisServicesScript(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                "kickstart -k system/com.wechat.articlecrawler.analysis-queue",
                 "kickstart -k system/com.wechat.articlecrawler.analysis-static",
                 "kickstart -k system/com.wechat.articlecrawler.reanalyze-api",
             ],
