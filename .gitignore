@@ -19,4 +19,5 @@ output/*
 .env
 .env.*
 !.env.example
+.dbg/
 docs/superpowers/plans/
