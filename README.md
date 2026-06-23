@@ -272,7 +272,7 @@ bin/restart_analysis_services.sh
 - 主抓取仍由 `com.wechat.articlecrawler.runproject` 按固定时刻执行，职责保持为“抓取、保存、推送”
 - 自动解读已改为写入 `output/async_jobs/`，主抓取不再立即拉起单篇解读子进程
 - 单篇自动解读使用 `analysis-queue`，batch follow-up 使用独立的 `analysis-batch-followup`
-- `com.wechat.articlecrawler.analysis-queue` 每 30 分钟运行一次，按顺序执行 `--drain-analysis-queue` 和 `--drain-batch-followup-queue`
+- `com.wechat.articlecrawler.analysis-queue` 每 30 分钟运行一次，并错开主抓取时刻，固定在每小时 `05/35` 分按顺序执行 `--drain-analysis-queue` 和 `--drain-batch-followup-queue`
 - `analysis-queue` 只消费单篇 `pending` / 到期 `retry_waiting` 任务，不会抢 batch follow-up job
 - `analysis-batch-followup` 只消费 `batch_analysis_pipeline` job，用于在单篇结果齐备后继续收敛批量摘要
 - 可恢复失败会留在统一 job 状态体系里，下一轮 drain 继续处理；明确的外部失败会进入 `failed_external`

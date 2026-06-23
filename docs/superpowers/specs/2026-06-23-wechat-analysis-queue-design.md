@@ -323,7 +323,7 @@
 
 - `WorkingDirectory = <repo>`
 - `RunAtLoad = false`
-- 使用 `StartCalendarInterval` 配置每小时 `0` 分和 `30` 分触发
+- 使用 `StartCalendarInterval` 配置每小时 `05/35` 分触发，避开主抓取整点窗口
 - `StandardOutPath` 写入 `logs/launchd.analysis-queue.out.log`
 - `StandardErrorPath` 写入 `logs/launchd.analysis-queue.err.log`
 
@@ -451,4 +451,4 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-batch-followup-
 - Single-article queue drain runs through `--drain-analysis-queue`.
 - Batch follow-up drain runs through `--drain-batch-followup-queue`.
 - Batch summary jobs live in `analysis-batch-followup`, not `analysis-queue`.
-- The `analysis-queue` launchd service owns the 30-minute retry cadence and runs both drains in order.
+- The `analysis-queue` launchd service owns the 30-minute retry cadence, runs at `05/35`, and executes both drains in order.

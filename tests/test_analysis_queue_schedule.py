@@ -14,7 +14,7 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         plist_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/config/launchd/com.wechat.articlecrawler.analysis-queue.plist")
         payload = plistlib.loads(plist_path.read_bytes())
         self.assertEqual(payload["Label"], "com.wechat.articlecrawler.analysis-queue")
-        self.assertEqual(payload["StartCalendarInterval"], [{"Minute": 0}, {"Minute": 30}])
+        self.assertEqual(payload["StartCalendarInterval"], [{"Minute": 5}, {"Minute": 35}])
         self.assertEqual(
             payload["ProgramArguments"],
             [
@@ -35,6 +35,7 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         content = readme_path.read_text(encoding="utf-8")
         self.assertIn("## 自动解读队列", content)
         self.assertIn("com.wechat.articlecrawler.analysis-queue", content)
+        self.assertIn("05/35", content)
         self.assertIn("--drain-analysis-queue", content)
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertIn("analysis-batch-followup", content)
@@ -46,6 +47,7 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         content = spec_path.read_text(encoding="utf-8")
         self.assertIn("## Implementation Notes", content)
         self.assertIn("Automatic analysis now uses enqueue-only scheduling", content)
+        self.assertIn("05/35", content)
         self.assertIn("--drain-analysis-queue", content)
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertIn("analysis-batch-followup", content)
@@ -324,6 +326,52 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                 self.assertEqual(result["failed_external"], 1)
                 self.assertEqual(payload["status"], "failed_external")
                 self.assertEqual(payload["retry_state"]["stop_reason"], "wechat_auth_required")
+
+    def test_drain_analysis_queue_passes_runtime_config_to_failure_notification(self):
+        captured = {}
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                return {"status": "skipped", "reason": "wechat_auth_required"}
+
+            def fake_notify(config, fetched, reason):
+                captured["config"] = dict(config or {})
+                return {"ok": True}
+
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                side_effect=fake_attach,
+            ), mock.patch.object(
+                wechat_crawler,
+                "_notify_async_analysis_stop",
+                side_effect=fake_notify,
+            ):
+                wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "article_id": "aid-runtime-notify",
+                        "status": "pending",
+                        "payload": {
+                            "config": {"serverchan_sendkey": "stale-sendkey", "analysis_enabled": False},
+                            "fetched": {"article_id": "aid-runtime-notify", "title": "T4"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                result = wechat_crawler.drain_analysis_queue(
+                    {"serverchan_sendkey": "runtime-sendkey", "analysis_enabled": True}
+                )
+
+                self.assertEqual(result["failed_external"], 1)
+                self.assertEqual(captured["config"]["serverchan_sendkey"], "runtime-sendkey")
+                self.assertTrue(captured["config"]["analysis_enabled"])
 
     def test_drain_analysis_queue_sets_job_running_before_invoking_analysis(self):
         with tempfile.TemporaryDirectory() as d:

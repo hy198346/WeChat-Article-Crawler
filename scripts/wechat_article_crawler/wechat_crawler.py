@@ -1423,9 +1423,11 @@ def _notify_async_analysis_stop(config, fetched, reason: str):
     )
 
 
-def _handle_async_single_article_result(job, analysis, job_path: Path):
+def _handle_async_single_article_result(job, analysis, job_path: Path, runtime_config=None):
     payload = job.get("payload") or {}
-    config = payload.get("config") or {}
+    config = payload.get("config") if runtime_config is None else runtime_config
+    if not isinstance(config, dict):
+        config = {}
     fetched = payload.get("fetched") or {}
     retry_state = _normalize_async_retry_state(job.get("retry_state"))
     if _is_successful_async_analysis(analysis):
@@ -1780,7 +1782,7 @@ def _run_analysis_queue_job(job_path: Path, job, runtime_config=None):
             )
         except Exception as exc:
             analysis = {"status": "error", "reason": f"{type(exc).__name__}:{exc}"}
-        outcome = _handle_async_single_article_result(job, analysis, job_path)
+        outcome = _handle_async_single_article_result(job, analysis, job_path, runtime_config=effective_config)
         if outcome.get("action") == "done":
             return "done"
         if outcome.get("action") == "stop":
