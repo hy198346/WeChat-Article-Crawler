@@ -1199,6 +1199,20 @@ def _find_active_single_article_async_job_by_article_id(article_id: str):
     return None
 
 
+def _single_article_async_job_effective_status(job) -> str:
+    if not isinstance(job, dict):
+        return ""
+    explicit_status = str(job.get("status") or "").strip()
+    if explicit_status:
+        return explicit_status
+    retry_state = _normalize_async_retry_state(job.get("retry_state"))
+    if retry_state.get("stop_reason"):
+        return "failed_external"
+    if retry_state.get("next_retry_at"):
+        return "retry_waiting"
+    return ""
+
+
 def _enqueue_single_article_analysis_job(config, fetched, refresh_index=True, force_reanalyze=False):
     job = _analysis_queue_job_payload(
         config,
@@ -1211,13 +1225,19 @@ def _enqueue_single_article_analysis_job(config, fetched, refresh_index=True, fo
         job_path = _write_async_job_file(job)
         return {"status": "scheduled", "job_file": str(job_path), "article_id": job["article_id"]}
     existing = json.loads(existing_job_path.read_text(encoding="utf-8"))
-    existing_status = str(existing.get("status") or "").strip()
+    existing_status = _single_article_async_job_effective_status(existing)
     if existing_status in ("failed_external", "retry_waiting"):
         existing["status"] = "pending"
+        existing["name"] = str(existing.get("name") or job.get("name") or "single_article_analysis")
+        existing["job_type"] = "single_article_analysis"
         existing["article_id"] = job["article_id"]
         existing["payload"] = job["payload"]
+        existing["attempt"] = 0
+        existing["first_failed_at"] = ""
+        existing["last_failed_at"] = ""
         existing["last_reason"] = ""
         existing["next_retry_at"] = ""
+        existing["retry_state"] = _default_async_retry_state()
         existing["updated_at"] = _async_retry_time_text()
         _rewrite_async_job_file(existing_job_path, existing)
         return {"status": "revived", "job_file": str(existing_job_path), "article_id": job["article_id"]}
