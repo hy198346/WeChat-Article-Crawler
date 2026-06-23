@@ -1139,6 +1139,29 @@ def _is_successful_async_analysis(analysis) -> bool:
     return str(analysis.get("status") or "").strip() == "ok"
 
 
+def _analysis_queue_job_payload(config, fetched, refresh_index=True, force_reanalyze=False):
+    fetched_payload = dict(fetched or {})
+    article_id = _normalize_article_id(fetched_payload.get("article_id")) or build_article_id(fetched_payload)
+    return {
+        "name": "single_article_analysis",
+        "job_type": "single_article_analysis",
+        "article_id": article_id,
+        "status": "pending",
+        "payload": {
+            "config": dict(config or {}),
+            "fetched": fetched_payload,
+            "refresh_index": bool(refresh_index),
+            "force_reanalyze": bool(force_reanalyze),
+        },
+        "attempt": 0,
+        "last_reason": "",
+        "first_failed_at": "",
+        "last_failed_at": "",
+        "next_retry_at": "",
+        "updated_at": _async_retry_time_text(),
+    }
+
+
 def _rewrite_async_job_file(job_path: Path, job):
     job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
     return job_path
@@ -1174,6 +1197,31 @@ def _find_active_single_article_async_job_by_article_id(article_id: str):
         if _extract_single_article_async_job_article_id(job) == normalized:
             return job_path
     return None
+
+
+def _enqueue_single_article_analysis_job(config, fetched, refresh_index=True, force_reanalyze=False):
+    job = _analysis_queue_job_payload(
+        config,
+        fetched,
+        refresh_index=refresh_index,
+        force_reanalyze=force_reanalyze,
+    )
+    existing_job_path = _find_active_single_article_async_job_by_article_id(job["article_id"])
+    if existing_job_path is None:
+        job_path = _write_async_job_file(job)
+        return {"status": "scheduled", "job_file": str(job_path), "article_id": job["article_id"]}
+    existing = json.loads(existing_job_path.read_text(encoding="utf-8"))
+    existing_status = str(existing.get("status") or "").strip()
+    if existing_status in ("failed_external", "retry_waiting"):
+        existing["status"] = "pending"
+        existing["article_id"] = job["article_id"]
+        existing["payload"] = job["payload"]
+        existing["last_reason"] = ""
+        existing["next_retry_at"] = ""
+        existing["updated_at"] = _async_retry_time_text()
+        _rewrite_async_job_file(existing_job_path, existing)
+        return {"status": "revived", "job_file": str(existing_job_path), "article_id": job["article_id"]}
+    return {"status": "deduped", "job_file": str(existing_job_path), "article_id": job["article_id"]}
 
 
 def _notify_async_analysis_stop(config, fetched, reason: str):
