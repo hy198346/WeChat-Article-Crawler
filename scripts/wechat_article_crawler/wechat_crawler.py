@@ -1521,6 +1521,23 @@ def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
         _sync_job_retry_fields(job)
         _rewrite_async_job_file(job_path, job)
         return {"action": "done"}
+    if isinstance(batch_result, dict) and str(batch_result.get("status") or "").strip() == "skipped":
+        reason = str(batch_result.get("reason") or "").strip() or "failed_external"
+        if reason != "waiting_single_article_queue":
+            retry_state = _normalize_async_retry_state(job.get("retry_state"))
+            retry_state["last_reason"] = reason
+            retry_state["next_retry_at"] = ""
+            retry_state["stop_reason"] = reason
+            retry_state["notified"] = False
+            job["status"] = "failed_external"
+            job["running_pid"] = 0
+            job["running_started_at"] = ""
+            job["retry_state"] = retry_state
+            job["last_result"] = dict(batch_result)
+            job["updated_at"] = _async_retry_time_text()
+            _sync_job_retry_fields(job)
+            _rewrite_async_job_file(job_path, job)
+            return {"action": "stop", "reason": reason}
     retry_state = _normalize_async_retry_state(job.get("retry_state"))
     current_attempt = retry_state.get("attempt") or 1
     delay_seconds = _next_async_retry_delay_seconds(current_attempt)
@@ -1743,9 +1760,10 @@ def _batch_followup_job_sort_key(job_path: Path, job, now_ts=None):
     return (status_rank, job_path.name)
 
 
-def _run_analysis_queue_job(job_path: Path, job):
+def _run_analysis_queue_job(job_path: Path, job, runtime_config=None):
     payload = job.get("payload") or {}
     job_type = str(job.get("job_type") or "").strip()
+    effective_config = payload.get("config") if runtime_config is None else runtime_config
     job["status"] = "running"
     job["running_pid"] = os.getpid()
     job["running_started_at"] = _async_retry_time_text()
@@ -1755,7 +1773,7 @@ def _run_analysis_queue_job(job_path: Path, job):
     if job_type == "single_article_analysis":
         try:
             analysis = _attach_single_article_analysis(
-                payload.get("config"),
+                effective_config,
                 payload.get("fetched"),
                 refresh_index=bool(payload.get("refresh_index", True)),
                 force_reanalyze=bool(payload.get("force_reanalyze", False)),
@@ -1771,7 +1789,7 @@ def _run_analysis_queue_job(job_path: Path, job):
     if job_type == "batch_analysis_pipeline":
         try:
             batch_result = _run_batch_analysis_pipeline(
-                payload.get("config"),
+                effective_config,
                 payload.get("changed_articles") or [],
                 payload.get("per_account_payloads") or [],
                 payload.get("headers") or {},
@@ -1785,6 +1803,8 @@ def _run_analysis_queue_job(job_path: Path, job):
         outcome = _handle_async_batch_summary_result(job, batch_result, job_path)
         if outcome.get("action") == "done":
             return "done"
+        if outcome.get("action") == "stop":
+            return "failed_external"
         return "retried"
     raise ValueError(f"unsupported_async_job_type:{job_type}")
 
@@ -1823,7 +1843,7 @@ def _iter_due_batch_followup_jobs(now_ts=None):
         yield job_path, job
 
 
-def _drain_analysis_queue_once(limit=None, now_ts=None):
+def _drain_analysis_queue_once(limit=None, now_ts=None, config=None):
     lock_handle = _acquire_analysis_queue_lock(now_ts=now_ts)
     if lock_handle is None:
         return {"status": "locked", "processed": 0, "done": 0, "retried": 0, "failed_external": 0}
@@ -1838,7 +1858,7 @@ def _drain_analysis_queue_once(limit=None, now_ts=None):
             if max_count > 0:
                 due_jobs = due_jobs[:max_count]
         for job_path, job in due_jobs:
-            outcome = _run_analysis_queue_job(job_path, job)
+            outcome = _run_analysis_queue_job(job_path, job, runtime_config=config)
             summary["processed"] += 1
             summary[outcome] = int(summary.get(outcome) or 0) + 1
         return summary
@@ -1846,7 +1866,7 @@ def _drain_analysis_queue_once(limit=None, now_ts=None):
         _release_analysis_queue_lock(lock_handle)
 
 
-def _drain_batch_followup_queue_once(limit=None, now_ts=None):
+def _drain_batch_followup_queue_once(limit=None, now_ts=None, config=None):
     lock_handle = _acquire_batch_followup_queue_lock(now_ts=now_ts)
     if lock_handle is None:
         return {"status": "locked", "processed": 0, "done": 0, "retried": 0, "failed_external": 0}
@@ -1861,7 +1881,7 @@ def _drain_batch_followup_queue_once(limit=None, now_ts=None):
             if max_count > 0:
                 due_jobs = due_jobs[:max_count]
         for job_path, job in due_jobs:
-            outcome = _run_analysis_queue_job(job_path, job)
+            outcome = _run_analysis_queue_job(job_path, job, runtime_config=config)
             summary["processed"] += 1
             summary[outcome] = int(summary.get(outcome) or 0) + 1
         return summary
@@ -1891,7 +1911,7 @@ def drain_analysis_queue(config=None, limit=None):
             max_count = 0
         if max_count > 0:
             candidates = candidates[:max_count]
-    result = _drain_analysis_queue_once(limit=len(candidates), now_ts=now_ts)
+    result = _drain_analysis_queue_once(limit=len(candidates), now_ts=now_ts, config=config)
     result["scanned"] = scanned
     result["due"] = len(candidates)
     return result
@@ -1919,7 +1939,7 @@ def drain_batch_followup_queue(config=None, limit=None):
             max_count = 0
         if max_count > 0:
             candidates = candidates[:max_count]
-    result = _drain_batch_followup_queue_once(limit=len(candidates), now_ts=now_ts)
+    result = _drain_batch_followup_queue_once(limit=len(candidates), now_ts=now_ts, config=config)
     result["scanned"] = scanned
     result["due"] = len(candidates)
     return result
