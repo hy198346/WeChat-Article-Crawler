@@ -1525,7 +1525,8 @@ def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
         return {"action": "done"}
     if isinstance(batch_result, dict) and str(batch_result.get("status") or "").strip() == "skipped":
         reason = str(batch_result.get("reason") or "").strip() or "failed_external"
-        if reason != "waiting_single_article_queue":
+        recoverable_reasons = {"waiting_single_article_queue", "analysis_disabled"}
+        if reason not in recoverable_reasons:
             retry_state = _normalize_async_retry_state(job.get("retry_state"))
             retry_state["last_reason"] = reason
             retry_state["next_retry_at"] = ""

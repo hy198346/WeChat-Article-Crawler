@@ -293,6 +293,8 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-batch-followup-
 
 安装/更新 `analysis-queue` LaunchAgent：
 
+- 先把 plist 里的绝对路径改成你本机的项目路径，再复制到 `~/Library/LaunchAgents/`
+
 ```bash
 cp config/launchd/com.wechat.articlecrawler.analysis-queue.plist ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
 launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist 2>/dev/null || true
