@@ -1552,6 +1552,9 @@ def _analysis_page_style_lines():
         ".directory-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}",
         ".directory-link{display:block;padding:12px 14px;border-radius:12px;background:#fff;border:1px solid #d0d7de;color:#0969da;text-decoration:none;font-size:13px;line-height:1.5;}",
         ".directory-link:hover{text-decoration:none;background:#f0f7ff;}",
+        ".directory-account{font-size:15px;font-weight:600;color:#24292f;}",
+        ".directory-count,.directory-latest-time{margin-top:4px;font-size:12px;color:#57606a;}",
+        ".directory-latest-title{margin-top:6px;color:#0969da;}",
         ".account-meta{color:#666;font-weight:400;font-size:12px;margin-left:8px;}",
         ".back-link{display:inline-block;margin-bottom:12px;color:#0969da;text-decoration:none;font-size:13px;}",
         ".back-link:hover{text-decoration:underline;}",
@@ -2122,12 +2125,15 @@ def build_analysis_index_html(config):
             html_parts.append(f'<div class="directory-group-title">{html_escape(category)}</div>')
             html_parts.append('<div class="directory-list">')
             for entry in group_items:
-                label = f'{entry["account"]}（{entry["count"]}）'
-                if entry["latest_time"]:
-                    label = f'{label}｜最新：{entry["latest_time"]}'
-                label = f'{label}｜标题：{entry["latest_title"]}'
                 html_parts.append(
-                    f'<a class="directory-link" href="{html_escape(entry["page_href"])}">{html_escape(label)}</a>'
+                    (
+                        f'<a class="directory-link" href="{html_escape(entry["page_href"])}">'
+                        f'<div class="directory-account">{html_escape(entry["account"])}</div>'
+                        f'<div class="directory-count">{entry["count"]} 篇</div>'
+                        f'<div class="directory-latest-time">{html_escape(entry["latest_time"])}</div>'
+                        f'<div class="directory-latest-title">{html_escape(entry["latest_title"])}</div>'
+                        "</a>"
+                    )
                 )
             html_parts.append("</div>")
             html_parts.append("</div>")

@@ -2198,9 +2198,13 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn("misc公众号", html)
             self.assertLess(html.find("daily公众号"), html.find("投研公众号"))
             self.assertLess(html.find("投研公众号"), html.find("misc公众号"))
-            self.assertIn("盘前纪要（1）｜最新：2026-06-12 09:00", html)
-            self.assertIn("研训社（1）｜最新：2026-06-12 10:00", html)
-            self.assertIn("未收录公众号（1）｜最新：2026-06-12 11:00", html)
+            self.assertIn('<div class="directory-account">盘前纪要</div>', html)
+            self.assertIn('<div class="directory-count">1 篇</div>', html)
+            self.assertIn('<div class="directory-latest-time">2026-06-12 09:00</div>', html)
+            self.assertIn('<div class="directory-account">研训社</div>', html)
+            self.assertIn('<div class="directory-latest-time">2026-06-12 10:00</div>', html)
+            self.assertIn('<div class="directory-account">未收录公众号</div>', html)
+            self.assertIn('<div class="directory-latest-time">2026-06-12 11:00</div>', html)
 
     def test_build_analysis_index_html_skips_empty_directory_categories(self):
         with tempfile.TemporaryDirectory() as d:
@@ -2265,7 +2269,12 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
 
             self.assertRegex(
                 html,
-                rf'<a class="directory-link" href="{re.escape(page_href)}">目录测试号（1）｜最新：2026-06-12 10:00｜标题：目录最新标题</a>',
+                rf'<a class="directory-link" href="{re.escape(page_href)}">\s*'
+                r'<div class="directory-account">目录测试号</div>\s*'
+                r'<div class="directory-count">1 篇</div>\s*'
+                r'<div class="directory-latest-time">2026-06-12 10:00</div>\s*'
+                r'<div class="directory-latest-title">目录最新标题</div>\s*'
+                r"</a>",
             )
 
     def test_build_analysis_index_html_directory_item_shows_title_with_mtime_fallback(self):
@@ -2297,7 +2306,12 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
 
             self.assertRegex(
                 html,
-                rf'<a class="directory-link" href="{re.escape(page_href)}">无时间目录号（1）｜最新：{expected}｜标题：只有标题也要显示</a>',
+                rf'<a class="directory-link" href="{re.escape(page_href)}">\s*'
+                r'<div class="directory-account">无时间目录号</div>\s*'
+                r'<div class="directory-count">1 篇</div>\s*'
+                rf'<div class="directory-latest-time">{re.escape(expected)}</div>\s*'
+                r'<div class="directory-latest-title">只有标题也要显示</div>\s*'
+                r"</a>",
             )
 
     def test_format_latest_time_falls_back_to_mtime_for_invalid_date_text(self):
@@ -2607,8 +2621,10 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             linked_pages = sorted(set(re.findall(r'href="accounts/([^"]+\.html)"', html)))
 
             self.assertIn("公众号目录", html)
-            self.assertIn("目录专用号（1）｜最新：2026-06-13 09:30｜标题：目录页不应展示正文", html)
-            self.assertIn("第二目录号（1）｜最新：2026-06-13 08:30｜标题：目录第二条", html)
+            self.assertIn('<div class="directory-account">目录专用号</div>', html)
+            self.assertIn('<div class="directory-latest-title">目录页不应展示正文</div>', html)
+            self.assertIn('<div class="directory-account">第二目录号</div>', html)
+            self.assertIn('<div class="directory-latest-title">目录第二条</div>', html)
             self.assertEqual(linked_pages, page_names)
             self.assertNotIn('class="item"', html)
             self.assertNotIn('class="reanalyze-button"', html)
