@@ -1,5 +1,6 @@
 import json
 import os
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,26 @@ import wechat_crawler
 
 
 class TestAnalysisQueueSchedule(unittest.TestCase):
+    def test_analysis_queue_plist_uses_every_30_minute_schedule(self):
+        plist_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/config/launchd/com.wechat.articlecrawler.analysis-queue.plist")
+        payload = plistlib.loads(plist_path.read_bytes())
+        self.assertEqual(payload["Label"], "com.wechat.articlecrawler.analysis-queue")
+        self.assertEqual(payload["StartCalendarInterval"], [{"Minute": 0}, {"Minute": 30}])
+        self.assertEqual(
+            payload["ProgramArguments"],
+            [
+                "/bin/zsh",
+                "/Users/chenwangqian/trae/WeChat-Article-Crawler/bin/run_analysis_queue_launchd.sh",
+            ],
+        )
+
+    def test_analysis_queue_launchd_script_runs_both_queue_drains(self):
+        script_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/bin/run_analysis_queue_launchd.sh")
+        content = script_path.read_text(encoding="utf-8")
+        self.assertIn("--drain-analysis-queue", content)
+        self.assertIn("--drain-batch-followup-queue", content)
+        self.assertLess(content.index("--drain-analysis-queue"), content.index("--drain-batch-followup-queue"))
+
     def test_enqueue_single_article_analysis_creates_pending_job(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

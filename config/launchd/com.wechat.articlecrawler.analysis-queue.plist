@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.wechat.articlecrawler.analysis-queue</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/chenwangqian/trae/WeChat-Article-Crawler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/zsh</string>
+      <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/bin/run_analysis_queue_launchd.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <array>
+      <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Minute</key>
+        <integer>30</integer>
+      </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/logs/launchd.analysis-queue.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chenwangqian/trae/WeChat-Article-Crawler/logs/launchd.analysis-queue.err.log</string>
+  </dict>
+</plist>
