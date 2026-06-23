@@ -2639,6 +2639,32 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertNotIn("目录观点", html)
             self.assertNotIn("第二目录主题", html)
 
+    def test_build_analysis_index_html_account_page_adds_article_anchor_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "anchor-entry-001",
+                        "account": "锚点测试号",
+                        "title": "锚点文章",
+                        "url": "https://mp.weixin.qq.com/s/anchor-entry",
+                        "published_at": "2026-06-23 08:30",
+                        "summary": "用于验证账号页单篇锚点。",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            _, account_html = self._find_account_page(d, "锚点测试号")
+
+            self.assertIn('class="item" id="article-anchor-entry-001"', account_html)
+            self.assertIn("锚点文章", account_html)
+
     def test_build_analysis_index_html_renders_directory_fetch_button_skeleton(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "article_analysis"
@@ -6238,6 +6264,47 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
                 os.environ.pop("WECHAT_ANALYSIS_PUBLIC_BASE_URL", None)
             else:
                 os.environ["WECHAT_ANALYSIS_PUBLIC_BASE_URL"] = old_public
+
+    def test_build_serverchan_markdown_articles_links_title_to_single_analysis_page(self):
+        article = {
+            "account": "号A",
+            "group": "测试分组",
+            "title": "A 文",
+            "published_at": "2026-06-11 21:30",
+            "url": "https://mp.weixin.qq.com/s/a?__biz=MjM5&mid=100&idx=1&sn=abc",
+        }
+
+        desp = wechat_crawler.build_serverchan_markdown_articles(
+            [article],
+            batch_analysis=None,
+            config={"analysis_public_base_url": "https://wx.example.com"},
+        )
+
+        expected_url = (
+            "https://wx.example.com/article_analysis/"
+            f'{article_analysis._account_page_relative_path("号A")}'
+            f'#article-{article_analysis.build_article_id(article)}'
+        )
+        self.assertIn(f"- 号A | 2026-06-11 21:30 | [A 文]({expected_url})", desp)
+        self.assertIn("[查看解读汇总](https://wx.example.com/article_analysis)", desp)
+
+    def test_build_serverchan_markdown_articles_falls_back_to_plain_title_when_account_missing(self):
+        desp = wechat_crawler.build_serverchan_markdown_articles(
+            [
+                {
+                    "account": "",
+                    "group": "测试分组",
+                    "title": "缺账号文章",
+                    "published_at": "2026-06-11 21:30",
+                    "url": "https://mp.weixin.qq.com/s/missing-account",
+                }
+            ],
+            batch_analysis=None,
+            config={"analysis_public_base_url": "https://wx.example.com"},
+        )
+
+        self.assertIn("- 2026-06-11 21:30 | 缺账号文章", desp)
+        self.assertNotIn("[缺账号文章](", desp)
 
     def test_push_articles_to_serverchan_uses_configured_summary_link_and_hides_all_analysis(self):
         calls = []

@@ -1272,6 +1272,7 @@ def _now_text():
 
 def _render_analysis_item_html(item: dict, config=None) -> str:
     article_id = _normalize_scalar_string(item.get("article_id"))
+    article_anchor_id = _article_anchor_id(article_id)
     title = _normalize_scalar_string(item.get("title")) or "(无标题)"
     url = _normalize_scalar_string(item.get("url"))
     date_text = _normalize_scalar_string(item.get("published_at")) or _normalize_scalar_string(
@@ -1328,7 +1329,11 @@ def _render_analysis_item_html(item: dict, config=None) -> str:
         action_buttons.append(f'<button {" ".join(button_attrs)}>{html_escape(spec["label"])}</button>')
 
     parts = [
-        '<div class="item">',
+        (
+            f'<div class="item" id="{html_escape(article_anchor_id)}">'
+            if article_anchor_id
+            else '<div class="item">'
+        ),
         f'<div class="title">{title_html}</div>',
         f'<div class="meta">{html_escape(date_text)}</div>' if date_text else '<div class="meta"></div>',
         (
@@ -1396,6 +1401,11 @@ def _account_slug(account: str) -> str:
 
 def _account_page_relative_path(account: str) -> str:
     return f"accounts/{_account_slug(account)}.html"
+
+
+def _article_anchor_id(article_id: str) -> str:
+    normalized = _normalize_article_id(article_id)
+    return f"article-{normalized}" if normalized else ""
 
 
 def _account_page_path(analysis_dir: Path, account: str, relative_path: Optional[str] = None) -> Path:

@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 
 try:
     from .article_analysis import (
+        _account_page_relative_path,
+        _article_anchor_id,
         analyze_single_article,
         build_article_id,
         build_analysis_index_html,
@@ -26,6 +28,8 @@ try:
     )
 except ImportError:
     from article_analysis import (
+        _account_page_relative_path,
+        _article_anchor_id,
         analyze_single_article,
         build_article_id,
         build_analysis_index_html,
@@ -977,6 +981,20 @@ def _resolve_serverchan_summary_url(config=None):
     if public_base_url:
         return f"{public_base_url}/article_analysis"
     return "/article_analysis"
+
+
+def _resolve_serverchan_single_article_analysis_url(config, article_info) -> str:
+    if not isinstance(article_info, dict):
+        return ""
+    account = _normalize_effective_account_name(article_info.get("account"))
+    if not account:
+        return ""
+    article_id = _article_anchor_id(build_article_id(article_info))
+    if not article_id:
+        return ""
+    summary_url = _resolve_serverchan_summary_url(config).rstrip("/")
+    page_path = _account_page_relative_path(account).lstrip("/")
+    return f"{summary_url}/{page_path}#{article_id}"
 
 
 def _build_article_payload(fetched, account_override=""):
@@ -2013,7 +2031,9 @@ def build_serverchan_markdown_articles(articles, batch_analysis=None, config=Non
             account = a.get("account") or ""
             title = a.get("title") or "(无标题)"
             published_at = a.get("published_at") or a.get("date") or ""
-            label = f"{account} | {published_at} | {title}".strip(" |")
+            single_analysis_url = _resolve_serverchan_single_article_analysis_url(config, a)
+            rendered_title = f"[{title}]({single_analysis_url})" if single_analysis_url else title
+            label = " | ".join(part for part in (account, published_at, rendered_title) if part)
             lines.append(f"- {label}")
         lines.append("")
     lines.extend([f"[查看解读汇总]({_resolve_serverchan_summary_url(config)})", ""])
