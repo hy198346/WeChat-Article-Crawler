@@ -161,7 +161,7 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertEqual(payload["analysis"]["status"], "pending")
         enqueue_mock.assert_called_once_with(config, dict(fetched))
 
-    def test_schedule_async_job_process_mode_keeps_non_analysis_jobs_immediate(self):
+    def test_schedule_async_job_process_mode_queues_batch_followup_without_spawn(self):
         with mock.patch.object(wechat_crawler, "_write_async_job_file") as write_mock, mock.patch.object(
             wechat_crawler,
             "_spawn_async_job_process",
@@ -181,10 +181,10 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                 if old_mode is not None:
                     wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode
             write_mock.assert_called_once()
-            spawn_mock.assert_called_once()
+            spawn_mock.assert_not_called()
             scheduled_job = write_mock.call_args[0][0]
             self.assertEqual(scheduled_job["job_type"], "batch_analysis_pipeline")
-            self.assertNotEqual(scheduled_job.get("queue_name"), "analysis-queue")
+            self.assertEqual(scheduled_job.get("queue_name"), "analysis-batch-followup")
 
     def test_drain_analysis_queue_runs_pending_job_to_done(self):
         with tempfile.TemporaryDirectory() as d:
@@ -607,6 +607,123 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                 self.assertEqual(seen, ["aid-single-ok"])
                 self.assertEqual(json.loads(Path(single_job).read_text(encoding="utf-8"))["status"], "done")
                 self.assertEqual(json.loads(Path(batch_job).read_text(encoding="utf-8"))["status"], "pending")
+
+    def test_drain_batch_followup_queue_runs_pending_batch_job(self):
+        batch_calls = []
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_run_batch_analysis_pipeline",
+                side_effect=lambda config, changed_articles, per_account_payloads, headers: batch_calls.append(
+                    [dict(item) for item in changed_articles]
+                )
+                or {
+                    "status": "ok",
+                    "summary": "batch done",
+                    "batch_focus": "focus",
+                    "shared_themes": [],
+                    "priority_reads": [],
+                },
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"), mock.patch.object(
+                wechat_crawler,
+                "persist_batch_analysis_outputs",
+            ):
+                job_path = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "push_latest_all_analysis",
+                        "job_type": "batch_analysis_pipeline",
+                        "queue_name": "analysis-batch-followup",
+                        "status": "pending",
+                        "payload": {
+                            "config": {"analysis_enabled": True},
+                            "changed_articles": [{"article_id": "aid-batch-consume", "title": "B"}],
+                            "per_account_payloads": [{"fakeid": "fidB"}],
+                            "headers": {},
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+
+                result = wechat_crawler._drain_batch_followup_queue_once()
+
+                self.assertEqual(result["processed"], 1)
+                self.assertEqual(result["done"], 1)
+                self.assertEqual(len(batch_calls), 1)
+                payload = json.loads(Path(job_path).read_text(encoding="utf-8"))
+                self.assertEqual(payload["status"], "done")
+
+    def test_drain_batch_followup_queue_skips_analysis_queue_jobs(self):
+        seen = []
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+
+            def fake_attach(config, fetched, refresh_index=True, force_reanalyze=False):
+                seen.append(fetched["article_id"])
+                return {"status": "ok", "summary": "done"}
+
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                side_effect=fake_attach,
+            ), mock.patch.object(
+                wechat_crawler,
+                "_run_batch_analysis_pipeline",
+                return_value={
+                    "status": "ok",
+                    "summary": "batch done",
+                    "batch_focus": "focus",
+                    "shared_themes": [],
+                    "priority_reads": [],
+                },
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"), mock.patch.object(
+                wechat_crawler,
+                "persist_batch_analysis_outputs",
+            ):
+                single_job = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "queue_name": "analysis-queue",
+                        "article_id": "aid-single-ignored",
+                        "status": "pending",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-single-ignored", "title": "S"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+                batch_job = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "push_latest_all_analysis",
+                        "job_type": "batch_analysis_pipeline",
+                        "queue_name": "analysis-batch-followup",
+                        "status": "pending",
+                        "payload": {
+                            "config": {"analysis_enabled": True},
+                            "changed_articles": [],
+                            "per_account_payloads": [],
+                            "headers": {},
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+
+                result = wechat_crawler._drain_batch_followup_queue_once()
+
+                self.assertEqual(result["processed"], 1)
+                self.assertEqual(result["done"], 1)
+                self.assertEqual(seen, [])
+                self.assertEqual(json.loads(Path(single_job).read_text(encoding="utf-8"))["status"], "pending")
+                self.assertEqual(json.loads(Path(batch_job).read_text(encoding="utf-8"))["status"], "done")
 
     def test_drain_analysis_queue_processes_pending_before_retry_waiting(self):
         call_order = []

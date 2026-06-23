@@ -5322,7 +5322,7 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             if old_wait is not None:
                 wechat_crawler._wait_for_async_jobs = old_wait
 
-    def test_schedule_async_job_uses_detached_process_for_non_single_article_jobs(self):
+    def test_schedule_async_job_queues_batch_followup_jobs_for_separate_worker(self):
         spawned = []
 
         old_mode = getattr(wechat_crawler, "_ASYNC_JOB_DISPATCH_MODE", None)
@@ -5348,9 +5348,9 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             )
 
             self.assertEqual(result["status"], "scheduled")
-            self.assertEqual(result["mode"], "process")
-            self.assertEqual(len(spawned), 1)
-            self.assertEqual(spawned[0], Path("/tmp/batch-job.json"))
+            self.assertEqual(result["mode"], "queued")
+            self.assertEqual(result["job_file"], "/tmp/batch-job.json")
+            self.assertEqual(spawned, [])
         finally:
             if old_mode is not None:
                 wechat_crawler._ASYNC_JOB_DISPATCH_MODE = old_mode

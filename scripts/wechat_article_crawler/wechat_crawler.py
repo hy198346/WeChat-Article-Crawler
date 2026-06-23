@@ -1052,8 +1052,16 @@ _BATCH_FOLLOWUP_QUEUE_NAME = "analysis-batch-followup"
 _ANALYSIS_QUEUE_RUNNING_STALE_SECONDS = 3600
 
 
+def _queue_lock_path(lock_name: str) -> Path:
+    return OUTPUT_ROOT / lock_name
+
+
 def _analysis_queue_lock_path() -> Path:
-    return OUTPUT_ROOT / "analysis_queue.lock"
+    return _queue_lock_path("analysis_queue.lock")
+
+
+def _batch_followup_queue_lock_path() -> Path:
+    return _queue_lock_path("batch_followup_queue.lock")
 
 
 def _process_exists(pid) -> bool:
@@ -1095,8 +1103,7 @@ def _is_analysis_queue_lock_stale(payload, now_ts=None) -> bool:
     return (current_ts - float(started_ts)) >= float(_ANALYSIS_QUEUE_LOCK_STALE_SECONDS)
 
 
-def _acquire_analysis_queue_lock(now_ts=None):
-    lock_path = _analysis_queue_lock_path()
+def _acquire_queue_lock(lock_path: Path, now_ts=None):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "pid": os.getpid(),
@@ -1124,7 +1131,15 @@ def _acquire_analysis_queue_lock(now_ts=None):
     return None
 
 
-def _release_analysis_queue_lock(lock_handle):
+def _acquire_analysis_queue_lock(now_ts=None):
+    return _acquire_queue_lock(_analysis_queue_lock_path(), now_ts=now_ts)
+
+
+def _acquire_batch_followup_queue_lock(now_ts=None):
+    return _acquire_queue_lock(_batch_followup_queue_lock_path(), now_ts=now_ts)
+
+
+def _release_queue_lock(lock_handle):
     if not isinstance(lock_handle, dict):
         return
     lock_path = lock_handle.get("path")
@@ -1140,6 +1155,14 @@ def _release_analysis_queue_lock(lock_handle):
         pass
     except OSError:
         pass
+
+
+def _release_analysis_queue_lock(lock_handle):
+    _release_queue_lock(lock_handle)
+
+
+def _release_batch_followup_queue_lock(lock_handle):
+    _release_queue_lock(lock_handle)
 
 
 def _default_async_retry_state():
@@ -1600,6 +1623,8 @@ def _schedule_async_job(name, func, *args, **kwargs):
                 force_reanalyze=bool(payload.get("force_reanalyze", False)),
             )
         job_path = _write_async_job_file(job)
+        if str(job.get("job_type") or "").strip() == "batch_analysis_pipeline":
+            return {"status": "scheduled", "name": name, "mode": "queued", "job_file": str(job_path)}
         process = _spawn_async_job_process(job_path)
         return {"status": "scheduled", "name": name, "mode": "process", "pid": getattr(process, "pid", None)}
 
@@ -1669,6 +1694,17 @@ def _is_analysis_queue_job(job) -> bool:
     return True
 
 
+def _is_batch_followup_job(job) -> bool:
+    if not isinstance(job, dict):
+        return False
+    if str(job.get("job_type") or "").strip() != "batch_analysis_pipeline":
+        return False
+    queue_name = str(job.get("queue_name") or "").strip()
+    if queue_name:
+        return queue_name == _BATCH_FOLLOWUP_QUEUE_NAME
+    return True
+
+
 def _analysis_queue_job_sort_key(job_path: Path, job, now_ts=None):
     if not _is_analysis_queue_job(job):
         return None
@@ -1687,6 +1723,24 @@ def _analysis_queue_job_sort_key(job_path: Path, job, now_ts=None):
     job_type = str((job or {}).get("job_type") or "").strip()
     type_rank = 0 if job_type == "single_article_analysis" else 1
     return (status_rank, type_rank, job_path.name)
+
+
+def _batch_followup_job_sort_key(job_path: Path, job, now_ts=None):
+    if not _is_batch_followup_job(job):
+        return None
+    status = _analysis_queue_job_effective_status(job)
+    if status == "pending":
+        status_rank = 0
+    elif status == "running" and _is_stale_running_analysis_queue_job(job, now_ts=now_ts):
+        status_rank = 1
+    elif status == "retry_waiting" and _seconds_until_async_retry(
+        _normalize_async_retry_state((job or {}).get("retry_state")).get("next_retry_at"),
+        now_ts=now_ts,
+    ) <= 0:
+        status_rank = 2
+    else:
+        return None
+    return (status_rank, job_path.name)
 
 
 def _run_analysis_queue_job(job_path: Path, job):
@@ -1752,6 +1806,23 @@ def _iter_due_analysis_jobs(now_ts=None):
         yield job_path, job
 
 
+def _iter_due_batch_followup_jobs(now_ts=None):
+    current_ts = float(now_ts if now_ts is not None else time.time())
+    candidates = []
+    for job_path in sorted(_async_jobs_dir().glob("*.json")):
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        sort_key = _batch_followup_job_sort_key(job_path, job, now_ts=current_ts)
+        if sort_key is None:
+            continue
+        candidates.append((sort_key, job_path, job))
+    candidates.sort(key=lambda item: item[0])
+    for _, job_path, job in candidates:
+        yield job_path, job
+
+
 def _drain_analysis_queue_once(limit=None, now_ts=None):
     lock_handle = _acquire_analysis_queue_lock(now_ts=now_ts)
     if lock_handle is None:
@@ -1773,6 +1844,29 @@ def _drain_analysis_queue_once(limit=None, now_ts=None):
         return summary
     finally:
         _release_analysis_queue_lock(lock_handle)
+
+
+def _drain_batch_followup_queue_once(limit=None, now_ts=None):
+    lock_handle = _acquire_batch_followup_queue_lock(now_ts=now_ts)
+    if lock_handle is None:
+        return {"status": "locked", "processed": 0, "done": 0, "retried": 0, "failed_external": 0}
+    summary = {"status": "ok", "processed": 0, "done": 0, "retried": 0, "failed_external": 0}
+    try:
+        due_jobs = list(_iter_due_batch_followup_jobs(now_ts=now_ts))
+        if limit:
+            try:
+                max_count = max(0, int(limit))
+            except Exception:
+                max_count = 0
+            if max_count > 0:
+                due_jobs = due_jobs[:max_count]
+        for job_path, job in due_jobs:
+            outcome = _run_analysis_queue_job(job_path, job)
+            summary["processed"] += 1
+            summary[outcome] = int(summary.get(outcome) or 0) + 1
+        return summary
+    finally:
+        _release_batch_followup_queue_lock(lock_handle)
 
 
 def drain_analysis_queue(config=None, limit=None):
@@ -1798,6 +1892,34 @@ def drain_analysis_queue(config=None, limit=None):
         if max_count > 0:
             candidates = candidates[:max_count]
     result = _drain_analysis_queue_once(limit=len(candidates), now_ts=now_ts)
+    result["scanned"] = scanned
+    result["due"] = len(candidates)
+    return result
+
+
+def drain_batch_followup_queue(config=None, limit=None):
+    now_ts = time.time()
+    candidates = []
+    scanned = 0
+    for job_path in sorted(_async_jobs_dir().glob("*.json")):
+        scanned += 1
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        sort_key = _batch_followup_job_sort_key(job_path, job, now_ts=now_ts)
+        if sort_key is None:
+            continue
+        candidates.append((sort_key, job_path))
+    candidates.sort(key=lambda item: item[0])
+    if limit:
+        try:
+            max_count = max(0, int(limit))
+        except Exception:
+            max_count = 0
+        if max_count > 0:
+            candidates = candidates[:max_count]
+    result = _drain_batch_followup_queue_once(limit=len(candidates), now_ts=now_ts)
     result["scanned"] = scanned
     result["due"] = len(candidates)
     return result
@@ -3603,6 +3725,7 @@ def main():
     parser.add_argument("--serve-reanalyze", action="store_true")
     parser.add_argument("--serve-analysis-static", action="store_true")
     parser.add_argument("--drain-analysis-queue", action="store_true")
+    parser.add_argument("--drain-batch-followup-queue", action="store_true")
     parser.add_argument("--run-async-job-file", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -3622,6 +3745,11 @@ def main():
 
     if args.drain_analysis_queue:
         result = drain_analysis_queue(config)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    if args.drain_batch_followup_queue:
+        result = drain_batch_followup_queue(config)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
