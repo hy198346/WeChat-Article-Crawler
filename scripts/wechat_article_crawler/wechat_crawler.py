@@ -48,7 +48,7 @@ REPO_ROOT = _repo_root()
 OUTPUT_ROOT = REPO_ROOT / "output"
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-DEBUG_SESSION_ID = "premarket-digest-fail"
+DEBUG_SESSION_ID = "wechat-interpret-failures"
 
 _ASYNC_JOB_DISPATCH_MODE = "thread"
 FETCH_LATEST_ALL_API_PATH = "/api/fetch-latest-all"
@@ -2071,7 +2071,25 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
     source_by_key = _collect_batch_source_map(per_account_payloads)
     batch_id = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     analysis_cfg = get_analysis_config(config)
+    # region debug-point C:batch-pipeline-start
+    try:
+        _dbg_report(
+            "C",
+            "batch_pipeline.start",
+            {
+                "batch_id": batch_id,
+                "changed_count": len(changed_articles or []),
+                "analysis_enabled": bool(analysis_cfg.get("analysis_enabled")),
+                "accounts": ",".join(
+                    [str((item or {}).get("account") or "")[:40] for item in (changed_articles or [])[:12]]
+                ),
+            },
+        )
+    except Exception:
+        pass
+    # endregion debug-point C:batch-pipeline-start
     if analysis_cfg.get("analysis_enabled"):
+        single_article_config = dict(config or {})
         batch_config = _build_batch_ollama_only_config(config)
         for article in changed_articles:
             source = source_by_key.get(article.get("fakeid")) or source_by_key.get(article.get("url")) or {}
@@ -2084,7 +2102,7 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                     except Exception:
                         fetched = None
             if fetched:
-                analysis = _attach_single_article_analysis(batch_config, fetched, refresh_index=False)
+                analysis = _attach_single_article_analysis(single_article_config, fetched, refresh_index=False)
             else:
                 analysis = {"status": "skipped", "reason": "missing_article_body"}
             article["analysis"] = analysis
@@ -2098,7 +2116,52 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                     "summary": analysis.get("summary"),
                 }
             )
+        # region debug-point C:batch-pipeline-items
+        try:
+            status_counts = {}
+            reason_counts = {}
+            source_counts = {}
+            for article in changed_articles or []:
+                analysis = article.get("analysis") if isinstance(article, dict) else None
+                if not isinstance(analysis, dict):
+                    continue
+                st = str(analysis.get("status") or "unknown")
+                status_counts[st] = int(status_counts.get(st) or 0) + 1
+                rs = str(analysis.get("reason") or "")
+                if rs:
+                    reason_counts[rs] = int(reason_counts.get(rs) or 0) + 1
+                src = str(analysis.get("source") or "")
+                if src:
+                    source_counts[src] = int(source_counts.get(src) or 0) + 1
+            _dbg_report(
+                "C",
+                "batch_pipeline.items_done",
+                {
+                    "batch_id": batch_id,
+                    "status_counts": status_counts,
+                    "reason_counts": reason_counts,
+                    "source_counts": source_counts,
+                },
+            )
+        except Exception:
+            pass
+        # endregion debug-point C:batch-pipeline-items
         batch_analysis = summarize_analysis_batch(batch_config, analysis_items, batch_id=batch_id)
+        # region debug-point C:batch-pipeline-summary
+        try:
+            _dbg_report(
+                "C",
+                "batch_pipeline.summary_done",
+                {
+                    "batch_id": batch_id,
+                    "status": str((batch_analysis or {}).get("status") or ""),
+                    "reason": str((batch_analysis or {}).get("reason") or "")[:240],
+                    "summary_chars": len(str((batch_analysis or {}).get("summary") or "")),
+                },
+            )
+        except Exception:
+            pass
+        # endregion debug-point C:batch-pipeline-summary
         if isinstance(batch_analysis, dict) and batch_analysis.get("status") == "ok":
             persist_batch_analysis_outputs(config, batch_analysis)
         _refresh_analysis_index_html(config)
@@ -2218,6 +2281,23 @@ def run_push_latest_all(
             ordered.extend(grouped[g])
         changed_articles = ordered
 
+    # region debug-point D:push-latest-all-changed
+    try:
+        _dbg_report(
+            "D",
+            "push_latest_all.changed_articles",
+            {
+                "count": len(changed_articles or []),
+                "push": bool(push),
+                "force": bool(force),
+                "push_separately": bool(push_separately),
+                "titles": " | ".join([str((a or {}).get("title") or "")[:80] for a in (changed_articles or [])[:8]]),
+            },
+        )
+    except Exception:
+        pass
+    # endregion debug-point D:push-latest-all-changed
+
     batch_analysis = None
     push_result = None
     pushed_fakeids = set()
@@ -2253,6 +2333,20 @@ def run_push_latest_all(
             for article in changed_articles:
                 article["analysis"] = _pending_async_analysis_payload("single_article")
             batch_analysis = _pending_async_analysis_payload("batch_summary")
+            # region debug-point D:push-latest-all-scheduled
+            try:
+                _dbg_report(
+                    "D",
+                    "push_latest_all.analysis_scheduled",
+                    {
+                        "count": len(changed_articles or []),
+                        "analysis_force_provider": str(analysis_cfg.get("analysis_force_provider") or ""),
+                        "analysis_news_interpret_url": str(analysis_cfg.get("analysis_news_interpret_url") or "")[:200],
+                    },
+                )
+            except Exception:
+                pass
+            # endregion debug-point D:push-latest-all-scheduled
             _schedule_async_job(
                 "push_latest_all_analysis",
                 _run_batch_analysis_pipeline,
