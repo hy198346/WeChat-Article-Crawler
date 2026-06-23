@@ -49,6 +49,12 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("| analysis_model | 可选 | qwen2.5-coder:14b-cpu |", content)
         self.assertIn("默认顺序重启 `com.wechat.articlecrawler.analysis-queue`", content)
         self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist", content)
+        self.assertIn("fresh install 时先在项目根目录执行 `mkdir -p logs output`", content)
+        self.assertIn("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output", content)
+        self.assertLess(
+            content.index("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output"),
+            content.index('launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist'),
+        )
 
     def test_config_json_example_aligns_with_code_defaults(self):
         example_path = REPO_ROOT / "config.json.example"
@@ -66,6 +72,7 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("--drain-analysis-queue", content)
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertIn("analysis-batch-followup", content)
+        self.assertIn("fresh install must create `logs/` and `output/` before `launchctl bootstrap`", content)
 
     def test_drain_commands_do_not_fallback_to_config_json_example(self):
         old_argv = sys.argv[:]

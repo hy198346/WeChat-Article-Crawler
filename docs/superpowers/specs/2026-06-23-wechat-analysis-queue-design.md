@@ -326,6 +326,7 @@
 - 使用 `StartCalendarInterval` 配置每小时 `05/35` 分触发，避开主抓取整点窗口
 - `StandardOutPath` 写入 `logs/launchd.analysis-queue.out.log`
 - `StandardErrorPath` 写入 `logs/launchd.analysis-queue.err.log`
+- fresh install must create `logs/` and `output/` before `launchctl bootstrap`, because launchd opens the configured stdout/stderr paths during bootstrap rather than after the script starts
 
 ### Startup Script
 

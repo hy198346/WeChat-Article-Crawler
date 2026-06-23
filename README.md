@@ -295,8 +295,10 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-batch-followup-
 安装/更新 `analysis-queue` LaunchAgent：
 
 - 先把 plist 里的绝对路径改成你本机的项目路径，再复制到 `~/Library/LaunchAgents/`
+- fresh install 时先在项目根目录执行 `mkdir -p logs output`，因为 `launchctl bootstrap` 会在启动前就打开 plist 里的日志路径；如果 `logs/` 不存在，bootstrap 会直接失败
 
 ```bash
+cd /path/to/WeChat-Article-Crawler && mkdir -p logs output
 cp config/launchd/com.wechat.articlecrawler.analysis-queue.plist ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
 launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
@@ -336,15 +338,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\bin\install_scheduled_task
 安装方式（以当前用户 LaunchAgent 为例）：
 
 1. 将 `config/launchd/*.plist` 复制到 `~/Library/LaunchAgents/`（并把 plist 里的绝对路径改成你本机的项目路径）。
-2. 加载主任务、自动解读队列与 watchdog：
+2. fresh install 时先在项目根目录执行 `mkdir -p logs output`，确保所有 launchd plist 的 `StandardOutPath` / `StandardErrorPath` 父目录在 `bootstrap` 前已存在。
+3. 加载主任务、自动解读队列与 watchdog：
 
 ```bash
+cd /path/to/WeChat-Article-Crawler && mkdir -p logs output
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.runproject.plist
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.watchdog.plist
 ```
 
-3. 查看状态/日志：
+4. 查看状态/日志：
 
 - 状态：`launchctl print "gui/$(id -u)/com.wechat.articlecrawler.runproject"` / `...watchdog`
 - 日志：`logs/launchd.run_project.*.log`、`logs/launchd.watchdog.*.log`、`logs/run_project_launchd.last.log`
