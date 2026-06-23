@@ -267,6 +267,39 @@ bin/restart_analysis_services.sh
 - 再重启 `com.wechat.articlecrawler.reanalyze-api`
 - 如需切换 `launchd` domain，可设置 `WECHAT_LAUNCHD_DOMAIN`，例如 `system`
 
+## 自动解读队列
+
+- 主抓取仍由 `com.wechat.articlecrawler.runproject` 按固定时刻执行，职责保持为“抓取、保存、推送”
+- 自动解读已改为写入 `output/async_jobs/`，主抓取不再立即拉起单篇解读子进程
+- 单篇自动解读使用 `analysis-queue`，batch follow-up 使用独立的 `analysis-batch-followup`
+- `com.wechat.articlecrawler.analysis-queue` 每 30 分钟运行一次，按顺序执行 `--drain-analysis-queue` 和 `--drain-batch-followup-queue`
+- `analysis-queue` 只消费单篇 `pending` / 到期 `retry_waiting` 任务，不会抢 batch follow-up job
+- `analysis-batch-followup` 只消费 `batch_analysis_pipeline` job，用于在单篇结果齐备后继续收敛批量摘要
+- 可恢复失败会留在统一 job 状态体系里，下一轮 drain 继续处理；明确的外部失败会进入 `failed_external`
+
+手工补跑：
+
+```bash
+python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-analysis-queue
+python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-batch-followup-queue
+```
+
+运行产物：
+
+- 队列 job：`output/async_jobs/*.json`
+- 单篇解读结果：`output/article_analysis/*.json`
+- 批量摘要结果：`output/article_batches/*.json`
+- worker 日志：`logs/launchd.analysis-queue.out.log`、`logs/launchd.analysis-queue.err.log`
+
+安装/更新 `analysis-queue` LaunchAgent：
+
+```bash
+cp config/launchd/com.wechat.articlecrawler.analysis-queue.plist ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist
+launchctl kickstart -k "gui/$(id -u)/com.wechat.articlecrawler.analysis-queue"
+```
+
 ## 自动运行（每天 8/12/16/20/24 点）
 
 本项目提供 Windows 计划任务安装脚本，会在每天以下时间自动运行：

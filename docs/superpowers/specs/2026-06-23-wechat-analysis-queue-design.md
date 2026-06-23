@@ -234,18 +234,21 @@
 ### 30 分钟 worker 流程
 
 1. `launchd` 触发 `analysis-queue` worker
-2. worker 先申请全局互斥锁
-3. 扫描 `output/async_jobs/` 中可处理的 job
-4. 优先处理 `pending`
-5. 再处理 `next_retry_at` 已到期的 `retry_waiting`
-6. 对每个 job：
+2. worker 先执行 `--drain-analysis-queue`
+3. `analysis-queue` drain 先申请单篇队列互斥锁
+4. 扫描 `output/async_jobs/` 中归属 `analysis-queue` 的单篇 job
+5. 优先处理 `pending`
+6. 再处理 stale `running` 与到期的 `retry_waiting`
+7. 对每个单篇 job：
    - 先标记为 `running`
    - 调用现有默认在线解读链路
    - 成功则标记为 `done`
    - 可恢复失败则标记为 `retry_waiting`
    - 外部条件失败则标记为 `failed_external`
-7. 每处理完一个成功任务，按现有逻辑落盘并刷新聚合页
-8. worker 结束前释放互斥锁
+8. 单篇 drain 完成后，同一个 launchd 脚本继续执行 `--drain-batch-followup-queue`
+9. `analysis-batch-followup` drain 使用独立互斥锁，只消费 `batch_analysis_pipeline` job
+10. batch follow-up 负责在单篇结果齐备后继续收敛批量摘要，不会回到 `analysis-queue`
+11. worker 结束前释放对应互斥锁
 
 ## Failure Strategy
 
@@ -331,10 +334,11 @@
 1. 自动推导仓库根目录
 2. 自动创建 `logs/`
 3. 自动读取根目录 `.env`
-4. 调用统一入口，例如：
+4. 按固定顺序调用两个真实消费入口：
 
 ```bash
 python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-analysis-queue
+python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-batch-followup-queue
 ```
 
 ## Implementation Strategy
@@ -440,3 +444,11 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --drain-analysis-queue
 3. 新文章与历史失败文章都进入统一自动解读队列
 4. 30 分钟 worker 能稳定消费队列并生成现有解读产物
 5. 主触发窗口内的自动解读压力明显低于改造前
+
+## Implementation Notes
+
+- Automatic analysis now uses enqueue-only scheduling for single-article jobs.
+- Single-article queue drain runs through `--drain-analysis-queue`.
+- Batch follow-up drain runs through `--drain-batch-followup-queue`.
+- Batch summary jobs live in `analysis-batch-followup`, not `analysis-queue`.
+- The `analysis-queue` launchd service owns the 30-minute retry cadence and runs both drains in order.

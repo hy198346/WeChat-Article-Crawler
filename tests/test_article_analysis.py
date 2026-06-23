@@ -7182,6 +7182,8 @@ class TestBatchSummaryOutput(unittest.TestCase):
         captured = {"attach_calls": 0, "batch_calls": 0}
 
         old_attach = getattr(wechat_crawler, "_attach_single_article_analysis", None)
+        old_load_cached = getattr(wechat_crawler, "_load_cached_analysis_by_article_id", None)
+        old_load_terminal = getattr(wechat_crawler, "_load_terminal_single_article_queue_analysis", None)
         old_batch = getattr(wechat_crawler, "summarize_analysis_batch", None)
         old_refresh = getattr(wechat_crawler, "_refresh_analysis_index_html", None)
         old_persist_batch = getattr(wechat_crawler, "persist_batch_analysis_outputs", None)
@@ -7195,6 +7197,8 @@ class TestBatchSummaryOutput(unittest.TestCase):
                 return {"status": "ok", "batch_id": batch_id, "summary": "不应生成"}
 
             wechat_crawler._attach_single_article_analysis = fake_attach
+            wechat_crawler._load_cached_analysis_by_article_id = lambda config, article_id: None
+            wechat_crawler._load_terminal_single_article_queue_analysis = lambda config, article: None
             wechat_crawler.summarize_analysis_batch = fake_batch
             wechat_crawler._refresh_analysis_index_html = lambda config: None
             wechat_crawler.persist_batch_analysis_outputs = lambda config, analysis: None
@@ -7235,6 +7239,10 @@ class TestBatchSummaryOutput(unittest.TestCase):
         finally:
             if old_attach is not None:
                 wechat_crawler._attach_single_article_analysis = old_attach
+            if old_load_cached is not None:
+                wechat_crawler._load_cached_analysis_by_article_id = old_load_cached
+            if old_load_terminal is not None:
+                wechat_crawler._load_terminal_single_article_queue_analysis = old_load_terminal
             if old_batch is not None:
                 wechat_crawler.summarize_analysis_batch = old_batch
             if old_refresh is not None:

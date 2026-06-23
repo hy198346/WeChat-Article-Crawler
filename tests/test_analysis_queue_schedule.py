@@ -30,6 +30,26 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("--drain-batch-followup-queue", content)
         self.assertLess(content.index("--drain-analysis-queue"), content.index("--drain-batch-followup-queue"))
 
+    def test_readme_documents_final_queue_workflow_and_batch_followup_drain(self):
+        readme_path = Path("/Users/chenwangqian/trae/WeChat-Article-Crawler/README.md")
+        content = readme_path.read_text(encoding="utf-8")
+        self.assertIn("## 自动解读队列", content)
+        self.assertIn("com.wechat.articlecrawler.analysis-queue", content)
+        self.assertIn("--drain-analysis-queue", content)
+        self.assertIn("--drain-batch-followup-queue", content)
+        self.assertIn("analysis-batch-followup", content)
+
+    def test_spec_documents_batch_followup_drain_behavior(self):
+        spec_path = Path(
+            "/Users/chenwangqian/trae/WeChat-Article-Crawler/docs/superpowers/specs/2026-06-23-wechat-analysis-queue-design.md"
+        )
+        content = spec_path.read_text(encoding="utf-8")
+        self.assertIn("## Implementation Notes", content)
+        self.assertIn("Automatic analysis now uses enqueue-only scheduling", content)
+        self.assertIn("--drain-analysis-queue", content)
+        self.assertIn("--drain-batch-followup-queue", content)
+        self.assertIn("analysis-batch-followup", content)
+
     def test_enqueue_single_article_analysis_creates_pending_job(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -856,6 +876,46 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                 self.assertEqual(payload["last_failed_at"], retry_state["last_failed_at"])
                 self.assertEqual(payload["next_retry_at"], retry_state["next_retry_at"])
                 spawn_mock.assert_not_called()
+
+    def test_retry_waiting_job_runs_when_due(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+                return_value={"status": "ok", "summary": "retry ok"},
+            ), mock.patch.object(wechat_crawler, "_refresh_analysis_index_html"):
+                job_path = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "queue_name": "analysis-queue",
+                        "article_id": "aid-retry-1",
+                        "status": "retry_waiting",
+                        "payload": {
+                            "config": {},
+                            "fetched": {"article_id": "aid-retry-1", "title": "retry"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "attempt": 1,
+                        "next_retry_at": "2026-06-23T00:00:00",
+                        "retry_state": {
+                            "attempt": 1,
+                            "retry_mode": "until_success",
+                            "first_failed_at": "2026-06-23T00:00:00",
+                            "last_failed_at": "2026-06-23T00:00:00",
+                            "last_reason": "timeout",
+                            "next_retry_at": "2026-06-23T00:00:00",
+                            "stop_reason": "",
+                            "notified": False,
+                        },
+                    }
+                )
+                result = wechat_crawler._drain_analysis_queue_once()
+                payload = json.loads(Path(job_path).read_text(encoding="utf-8"))
+                self.assertEqual(result["done"], 1)
+                self.assertEqual(payload["status"], "done")
 
 
 if __name__ == "__main__":
