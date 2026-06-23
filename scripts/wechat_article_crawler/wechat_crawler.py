@@ -1775,12 +1775,16 @@ def _run_analysis_queue_job(job_path: Path, job, runtime_config=None):
     _rewrite_async_job_file(job_path, job)
     if job_type == "single_article_analysis":
         try:
-            analysis = _attach_single_article_analysis(
-                effective_config,
-                payload.get("fetched"),
-                refresh_index=bool(payload.get("refresh_index", True)),
-                force_reanalyze=bool(payload.get("force_reanalyze", False)),
-            )
+            runtime_analysis_cfg = get_analysis_config(effective_config) if runtime_config is not None else {}
+            if runtime_config is not None and not runtime_analysis_cfg.get("analysis_enabled"):
+                analysis = {"status": "skipped", "reason": "analysis_disabled"}
+            else:
+                analysis = _attach_single_article_analysis(
+                    effective_config,
+                    payload.get("fetched"),
+                    refresh_index=bool(payload.get("refresh_index", True)),
+                    force_reanalyze=bool(payload.get("force_reanalyze", False)),
+                )
         except Exception as exc:
             analysis = {"status": "error", "reason": f"{type(exc).__name__}:{exc}"}
         outcome = _handle_async_single_article_result(job, analysis, job_path, runtime_config=effective_config)

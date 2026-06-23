@@ -978,6 +978,42 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
                 self.assertEqual(captured["config"]["analysis_model"], "current-model")
                 self.assertTrue(captured["config"]["analysis_enabled"])
 
+    def test_drain_analysis_queue_preserves_analysis_disabled_when_runtime_config_disables_ai(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            with mock.patch.object(wechat_crawler, "OUTPUT_ROOT", root), mock.patch.object(
+                wechat_crawler,
+                "_attach_single_article_analysis",
+            ) as attach_mock:
+                job_path = wechat_crawler._write_async_job_file(
+                    {
+                        "name": "single_article_analysis",
+                        "job_type": "single_article_analysis",
+                        "queue_name": "analysis-queue",
+                        "article_id": "aid-runtime-disabled",
+                        "status": "pending",
+                        "payload": {
+                            "config": {"analysis_model": "snapshot-model", "analysis_enabled": True},
+                            "fetched": {"article_id": "aid-runtime-disabled", "title": "Disabled At Drain"},
+                            "refresh_index": True,
+                            "force_reanalyze": False,
+                        },
+                        "retry_state": wechat_crawler._default_async_retry_state(),
+                        "updated_at": "",
+                    }
+                )
+
+                result = wechat_crawler.drain_analysis_queue({"analysis_enabled": False})
+
+                attach_mock.assert_not_called()
+                self.assertEqual(result["retried"], 1)
+                self.assertEqual(result["failed_external"], 0)
+                payload = json.loads(Path(job_path).read_text(encoding="utf-8"))
+                self.assertEqual(payload["status"], "retry_waiting")
+                self.assertEqual(payload["last_result"]["status"], "skipped")
+                self.assertEqual(payload["last_result"]["reason"], "analysis_disabled")
+                self.assertEqual(payload["retry_state"]["last_reason"], "analysis_disabled")
+
     def test_drain_batch_followup_queue_uses_current_runtime_config_instead_of_job_snapshot(self):
         captured = {}
 
