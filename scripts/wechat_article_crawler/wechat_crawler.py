@@ -1322,6 +1322,10 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
         retry_state["stop_reason"] = reason
         notify_result = _notify_async_analysis_stop(config, fetched, reason)
         retry_state["notified"] = bool(notify_result.get("ok"))
+        job["status"] = "failed_external"
+        job["retry_state"] = retry_state
+        job["last_result"] = dict(analysis) if isinstance(analysis, dict) else {"status": "skipped", "reason": reason}
+        _rewrite_async_job_file(job_path, job)
         print(
             f"[{_ts_now()}] async single article analysis stopped "
             f"title={fetched.get('title') or ''} reason={reason}"
@@ -1338,7 +1342,9 @@ def _handle_async_single_article_result(job, analysis, job_path: Path):
     retry_state["next_retry_at"] = _async_retry_time_text(time.time() + delay_seconds)
     retry_state["stop_reason"] = ""
     retry_state["notified"] = False
+    job["status"] = "retry_waiting"
     job["retry_state"] = retry_state
+    job["last_result"] = dict(analysis) if isinstance(analysis, dict) else {"status": "skipped", "reason": reason}
     _rewrite_async_job_file(job_path, job)
     try:
         _spawn_async_job_process(job_path)
@@ -1379,6 +1385,7 @@ def _handle_async_batch_summary_result(job, batch_result, job_path: Path):
     retry_state["next_retry_at"] = _async_retry_time_text(time.time() + delay_seconds)
     retry_state["stop_reason"] = ""
     retry_state["notified"] = False
+    job["status"] = "retry_waiting"
     job["retry_state"] = retry_state
     job["last_result"] = dict(batch_result)
     _rewrite_async_job_file(job_path, job)
@@ -1473,7 +1480,7 @@ def _run_async_job_file(job_file):
                 force_reanalyze=bool(payload.get("force_reanalyze", False)),
             )
             outcome = _handle_async_single_article_result(job, analysis, job_path)
-            if outcome.get("action") == "requeued":
+            if outcome.get("action") in ("requeued", "stop"):
                 remove_job_file = False
             return
         if job_type == "batch_analysis_pipeline":
@@ -1521,6 +1528,103 @@ def _schedule_async_job(name, func, *args, **kwargs):
     thread = threading.Thread(target=runner, name=name, daemon=True)
     thread.start()
     return {"status": "scheduled", "name": name, "mode": "thread"}
+
+
+def _batch_async_job_effective_status(job) -> str:
+    if not isinstance(job, dict):
+        return ""
+    explicit_status = str(job.get("status") or "").strip()
+    if explicit_status:
+        return explicit_status
+    retry_state = _normalize_async_retry_state(job.get("retry_state"))
+    if retry_state.get("next_retry_at"):
+        return "retry_waiting"
+    return "pending"
+
+
+def _analysis_queue_job_effective_status(job) -> str:
+    job_type = str((job or {}).get("job_type") or "").strip()
+    if job_type == "single_article_analysis":
+        return _single_article_async_job_effective_status(job) or "pending"
+    if job_type == "batch_analysis_pipeline":
+        return _batch_async_job_effective_status(job)
+    return ""
+
+
+def _analysis_queue_job_sort_key(job_path: Path, job, now_ts=None):
+    status = _analysis_queue_job_effective_status(job)
+    if status == "pending":
+        status_rank = 0
+    elif status == "retry_waiting" and _seconds_until_async_retry(
+        _normalize_async_retry_state((job or {}).get("retry_state")).get("next_retry_at"),
+        now_ts=now_ts,
+    ) <= 0:
+        status_rank = 1
+    else:
+        return None
+    job_type = str((job or {}).get("job_type") or "").strip()
+    type_rank = 0 if job_type == "single_article_analysis" else 1
+    return (status_rank, type_rank, job_path.name)
+
+
+def drain_analysis_queue(config=None, limit=None):
+    now_ts = time.time()
+    candidates = []
+    scanned = 0
+    for job_path in sorted(_async_jobs_dir().glob("*.json")):
+        scanned += 1
+        try:
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        sort_key = _analysis_queue_job_sort_key(job_path, job, now_ts=now_ts)
+        if sort_key is None:
+            continue
+        candidates.append((sort_key, job_path))
+    candidates.sort(key=lambda item: item[0])
+    if limit:
+        try:
+            max_count = max(0, int(limit))
+        except Exception:
+            max_count = 0
+        if max_count > 0:
+            candidates = candidates[:max_count]
+    processed = 0
+    succeeded = 0
+    requeued = 0
+    terminal = 0
+    failed = 0
+    for _, job_path in candidates:
+        processed += 1
+        try:
+            _run_async_job_file(str(job_path))
+        except Exception as exc:
+            failed += 1
+            print(f"[{_ts_now()}] WARN drain analysis queue failed job={job_path.name} err={type(exc).__name__}:{exc}")
+            continue
+        if not job_path.exists():
+            succeeded += 1
+            continue
+        try:
+            job_after = json.loads(job_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            failed += 1
+            continue
+        status_after = _analysis_queue_job_effective_status(job_after)
+        if status_after == "failed_external":
+            terminal += 1
+        elif status_after == "retry_waiting":
+            requeued += 1
+    return {
+        "status": "ok",
+        "scanned": scanned,
+        "due": len(candidates),
+        "processed": processed,
+        "succeeded": succeeded,
+        "requeued": requeued,
+        "terminal": terminal,
+        "failed": failed,
+    }
 
 
 def _run_fetch_latest_all_async_job(config, **kwargs):
@@ -2258,6 +2362,48 @@ def _load_cached_batch_article_analysis(config, article):
     return merged
 
 
+def _load_terminal_single_article_queue_analysis(config, article):
+    if not isinstance(article, dict):
+        return None
+    article_id = _normalize_article_id(article.get("article_id"))
+    if not article_id:
+        try:
+            article_id = build_article_id(article)
+        except Exception:
+            article_id = ""
+    if not article_id:
+        return None
+    job_path = _find_active_single_article_async_job_by_article_id(article_id)
+    if job_path is None:
+        return None
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if _single_article_async_job_effective_status(job) != "failed_external":
+        return None
+    analysis = job.get("last_result") if isinstance(job.get("last_result"), dict) else {}
+    if not analysis:
+        retry_state = _normalize_async_retry_state(job.get("retry_state"))
+        payload = job.get("payload") or {}
+        fetched = payload.get("fetched") or {}
+        analysis = {
+            "status": "skipped",
+            "reason": str(retry_state.get("stop_reason") or retry_state.get("last_reason") or "failed_external").strip()
+            or "failed_external",
+            "article_id": article_id,
+            "account": fetched.get("account") or article.get("account"),
+            "title": fetched.get("title") or article.get("title"),
+            "url": fetched.get("url") or article.get("url"),
+        }
+    merged, _ = _merge_fetched_fields_into_analysis(dict(analysis), article)
+    if merged.get("summary") is None:
+        merged["summary"] = ""
+    if merged.get("core_points") is None:
+        merged["core_points"] = []
+    return merged
+
+
 def _build_batch_ollama_only_config(config):
     cfg = dict(config or {})
     cfg["analysis_force_provider"] = "ollama"
@@ -2302,6 +2448,21 @@ def _run_batch_analysis_pipeline(config, changed_articles, per_account_payloads,
                 cached_analysis = _load_cached_batch_article_analysis(single_article_config, article)
                 if cached_analysis:
                     analysis = cached_analysis
+                    article["analysis"] = analysis
+                    analysis_items.append(
+                        {
+                            "status": analysis.get("status"),
+                            "account": article.get("account"),
+                            "title": article.get("title"),
+                            "topic": analysis.get("topic"),
+                            "core_points": analysis.get("core_points"),
+                            "summary": analysis.get("summary"),
+                        }
+                    )
+                    continue
+                terminal_analysis = _load_terminal_single_article_queue_analysis(single_article_config, article)
+                if terminal_analysis:
+                    analysis = terminal_analysis
                     article["analysis"] = analysis
                     analysis_items.append(
                         {
@@ -3265,6 +3426,7 @@ def main():
     parser.add_argument("--no-push", action="store_true")
     parser.add_argument("--serve-reanalyze", action="store_true")
     parser.add_argument("--serve-analysis-static", action="store_true")
+    parser.add_argument("--drain-analysis-queue", action="store_true")
     parser.add_argument("--run-async-job-file", type=str, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -3281,6 +3443,11 @@ def main():
     config_example = str(REPO_ROOT / "config.json.example")
     if (not config) and os.path.exists(config_example):
         config = load_json(config_example)
+
+    if args.drain_analysis_queue:
+        result = drain_analysis_queue(config)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
 
     if args.refresh_auth:
         try:
