@@ -2065,6 +2065,10 @@ def build_analysis_index_html(config):
             "_mtime": mtime,
             "_sort_key": _analysis_sort_key_with_mtime(date_text, mtime, path.name),
         }
+        if item["status"] == "ok":
+            item["reason"] = ""
+            item["need_login"] = False
+            item["needLoginUrl"] = ""
         if _should_skip_index_item(item):
             continue
         items.append(item)

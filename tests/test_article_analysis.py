@@ -3570,6 +3570,45 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 html,
             )
 
+    def test_build_analysis_index_html_ignores_stale_need_login_on_success_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "reason": "need_login",
+                        "need_login": True,
+                        "needLoginUrl": "/api/telegraph/interpret/file?jobId=stale&name=need_login.png",
+                        "article_id": "entry",
+                        "account": "号A",
+                        "title": "成功文章",
+                        "url": "https://mp.weixin.qq.com/s/stale-success",
+                        "published_at": "2026-06-24 21:00",
+                        "summary": "已经成功解读",
+                        "topic": "",
+                        "core_points": [],
+                        "audience": "",
+                        "risks": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(
+                d,
+                config={
+                    "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret"
+                },
+            )
+            _, html = self._find_account_page(d, "号A")
+
+            self.assertIn("已经成功解读", html)
+            self.assertIn('<div class="reanalyze-login-hint"></div>', html)
+            self.assertNotIn("jobId=stale&amp;name=need_login.png", html)
+
     def test_merge_index_items_for_same_url_clears_stale_need_login_after_success(self):
         previous = {
             "_sort_key": (1, "2026-06-24 10:00", "prev.json"),
