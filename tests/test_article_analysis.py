@@ -6465,6 +6465,33 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         self.assertIn(f"- 号A | 2026-06-11 21:30 | [A 文]({expected_url})", desp)
         self.assertIn("[查看解读汇总](https://wx.example.com/article_analysis)", desp)
 
+    def test_build_serverchan_markdown_articles_escapes_markdown_special_chars_in_title(self):
+        article = {
+            "article_id": "serverchan-link-escaped-title",
+            "account": "云头条",
+            "group": "测试分组",
+            "title": r"突发！阿里巴巴[港股]（这 2 个销售）\今夜无眠",
+            "published_at": "2026-06-24 09:30",
+            "url": "https://mp.weixin.qq.com/s/escaped-title",
+        }
+
+        desp = wechat_crawler.build_serverchan_markdown_articles(
+            [article],
+            batch_analysis=None,
+            config={"analysis_public_base_url": "https://wx.example.com"},
+        )
+
+        expected_url = (
+            "https://wx.example.com/article_analysis/"
+            f'{article_analysis._account_page_relative_path("云头条")}'
+            "#article-serverchan-link-escaped-title"
+        )
+        self.assertIn(
+            r"- 云头条 | 2026-06-24 09:30 | [突发！阿里巴巴\[港股\]（这 2 个销售）\\今夜无眠]"
+            f"({expected_url})",
+            desp,
+        )
+
     def test_build_serverchan_markdown_articles_falls_back_to_plain_title_when_article_id_missing(self):
         desp = wechat_crawler.build_serverchan_markdown_articles(
             [

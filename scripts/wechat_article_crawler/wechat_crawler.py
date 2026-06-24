@@ -161,6 +161,13 @@ def _normalize_effective_account_name(value):
     return text
 
 
+def _escape_markdown_link_text(value) -> str:
+    text = str(value or "")
+    for ch in ("\\", "[", "]", "(", ")"):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
 def _resolve_reanalyze_api_path(config) -> str:
     cfg = get_analysis_config(config or {})
     path = str(cfg.get("analysis_reanalyze_path") or "").strip() or "/api/reanalyze"
@@ -2596,7 +2603,9 @@ def build_serverchan_markdown_articles(articles, batch_analysis=None, config=Non
             title = a.get("title") or "(无标题)"
             published_at = a.get("published_at") or a.get("date") or ""
             single_analysis_url = _resolve_serverchan_single_article_analysis_url(config, a)
-            rendered_title = f"[{title}]({single_analysis_url})" if single_analysis_url else title
+            rendered_title = (
+                f"[{_escape_markdown_link_text(title)}]({single_analysis_url})" if single_analysis_url else title
+            )
             label = " | ".join(part for part in (account, published_at, rendered_title) if part)
             lines.append(f"- {label}")
         lines.append("")
