@@ -3529,6 +3529,39 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn("需要扫码登录元宝", html)
             self.assertIn("setReanalyzeNeedLoginHint", html)
 
+    def test_build_analysis_index_html_auto_retries_after_need_login(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "article_analysis"
+            root.mkdir(parents=True, exist_ok=True)
+            (root / "entry.json").write_text(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "article_id": "entry",
+                        "account": "号A",
+                        "title": "扫码后自动重试",
+                        "url": "https://mp.weixin.qq.com/s/reanalyze-entry",
+                        "published_at": "2026-06-12 08:00",
+                        "topic": "主题",
+                        "core_points": ["观点"],
+                        "audience": "读者",
+                        "risks": ["风险"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self._build_and_read_index_html(d)
+            _, html = self._find_account_page(d, "号A")
+
+            self.assertIn("const REANALYZE_NEED_LOGIN_RETRY_DELAY_MS =", html)
+            self.assertIn("const REANALYZE_NEED_LOGIN_RETRY_MAX_ATTEMPTS =", html)
+            self.assertIn("function queueNeedLoginReanalyzeRetry(", html)
+            self.assertIn("function triggerReanalyzeRequest(", html)
+            self.assertIn("等待登录后自动重试", html)
+            self.assertIn("queueNeedLoginReanalyzeRetry(button", html)
+
     def test_build_analysis_index_html_renders_need_login_qr_link_with_news_origin(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "article_analysis"
