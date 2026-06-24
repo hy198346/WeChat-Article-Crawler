@@ -1119,6 +1119,63 @@ class TestArticleAnalysis(unittest.TestCase):
             article_analysis.requests.post = old_post
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_local_fallback_success_clears_need_login_reason(self):
+        def fake_post(url, json=None, timeout=0, headers=None):
+            class Resp:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "error": "need_login",
+                        "need_login": True,
+                        "needLoginUrl": "/api/telegraph/interpret/file?jobId=test&name=need_login.png",
+                    }
+
+            return Resp()
+
+        old_post = article_analysis.requests.post
+        old_local = getattr(article_analysis, "_analyze_single_article_with_local_llm", None)
+        article_analysis.requests.post = fake_post
+        article_analysis._analyze_single_article_with_local_llm = (
+            lambda config, article, article_id: {
+                "status": "ok",
+                "article_id": article_id,
+                "summary": "本地兜底成功",
+                "source": "ollama",
+            }
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_news_interpret_url": "https://news.example.com/api/telegraph/interpret",
+                        "analysis_output_dir": d,
+                        "analysis_skip_if_exists": False,
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "本地兜底清理 need_login",
+                        "published_at": "2026-06-24 20:00",
+                        "url": "https://mp.weixin.qq.com/s/local-fallback-clears-need-login",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["summary"], "本地兜底成功")
+                self.assertEqual(result["source"], "local_fallback")
+                self.assertEqual(result.get("reason"), "")
+                self.assertFalse(result.get("need_login"))
+                self.assertEqual(result.get("needLoginUrl"), "")
+        finally:
+            article_analysis.requests.post = old_post
+            if old_local is not None:
+                article_analysis._analyze_single_article_with_local_llm = old_local
+
     def test_analyze_single_article_force_yuanbao_skips_placeholder_empty_summary(self):
         def fake_post(url, json=None, timeout=0, headers=None):
             class Resp:
@@ -3512,6 +3569,50 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
                 "https://news.example.com/api/telegraph/interpret/file?jobId=test-job&amp;name=need_login.png",
                 html,
             )
+
+    def test_merge_index_items_for_same_url_clears_stale_need_login_after_success(self):
+        previous = {
+            "_sort_key": (1, "2026-06-24 10:00", "prev.json"),
+            "article_id": "aid-merge",
+            "account": "号A",
+            "title": "旧 need login",
+            "url": "https://mp.weixin.qq.com/s/merge-aid",
+            "published_at": "2026-06-24 10:00",
+            "status": "skipped",
+            "reason": "need_login",
+            "need_login": True,
+            "needLoginUrl": "/api/telegraph/interpret/file?jobId=old&name=need_login.png",
+            "summary": "",
+            "topic": "",
+            "audience": "",
+            "core_points": [],
+            "risks": ["need_login"],
+        }
+        current = {
+            "_sort_key": (2, "2026-06-24 10:05", "current.json"),
+            "article_id": "aid-merge",
+            "account": "号A",
+            "title": "新成功结果",
+            "url": "https://mp.weixin.qq.com/s/merge-aid",
+            "published_at": "2026-06-24 10:05",
+            "status": "ok",
+            "reason": "",
+            "need_login": False,
+            "needLoginUrl": "",
+            "summary": "已经解读成功",
+            "topic": "",
+            "audience": "",
+            "core_points": [],
+            "risks": [],
+        }
+
+        merged = article_analysis._merge_index_items_for_same_url(previous, current)
+
+        self.assertEqual(merged["status"], "ok")
+        self.assertEqual(merged.get("reason"), "")
+        self.assertFalse(merged.get("need_login"))
+        self.assertEqual(merged.get("needLoginUrl"), "")
+        self.assertEqual(merged.get("summary"), "已经解读成功")
 
     def test_build_analysis_index_html_links_same_article_provider_buttons_busy_and_restore_contract(self):
         with tempfile.TemporaryDirectory() as d:

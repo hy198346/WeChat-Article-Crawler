@@ -1177,8 +1177,22 @@ def analyze_single_article(config, article):
         result = _analyze_single_article_with_local_llm(config, article, article_id)
         if result.get("status") == "ok" and remote_error:
             result["source"] = "local_fallback"
-            if not result.get("reason"):
+            if remote_error != "need_login" and not result.get("reason"):
                 result["reason"] = remote_error
+
+    if result.get("status") == "ok":
+        if _normalize_scalar_string(result.get("reason")) == "need_login":
+            result["reason"] = ""
+        elif "reason" not in result:
+            result["reason"] = ""
+        if bool(result.get("need_login")):
+            result["need_login"] = False
+        elif "need_login" not in result:
+            result["need_login"] = False
+        if _normalize_scalar_string(result.get("needLoginUrl")):
+            result["needLoginUrl"] = ""
+        elif "needLoginUrl" not in result:
+            result["needLoginUrl"] = ""
 
     # region debug-point B:analysis-final
     try:
@@ -1496,6 +1510,10 @@ def _merge_index_items_for_same_url(previous: dict, current: dict):
         merged[field] = _normalize_list(secondary.get(field)) or _normalize_list(primary.get(field))
     if not merged.get("need_login"):
         merged["need_login"] = bool(primary.get("need_login")) or bool(secondary.get("need_login"))
+    if _normalize_scalar_string(merged.get("status")) == "ok":
+        merged["reason"] = ""
+        merged["need_login"] = False
+        merged["needLoginUrl"] = ""
 
     return merged
 
