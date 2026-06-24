@@ -21,6 +21,7 @@ try:
         build_article_id,
         build_analysis_index_html,
         get_analysis_config,
+        get_analysis_output_root,
         _normalize_article_id,
         persist_batch_analysis_outputs,
         persist_single_analysis_outputs,
@@ -34,6 +35,7 @@ except ImportError:
         build_article_id,
         build_analysis_index_html,
         get_analysis_config,
+        get_analysis_output_root,
         _normalize_article_id,
         persist_batch_analysis_outputs,
         persist_single_analysis_outputs,
@@ -990,6 +992,22 @@ def _resolve_serverchan_summary_url(config=None):
     return "/article_analysis"
 
 
+def _has_materialized_single_article_analysis_page(config, account: str, article_id: str) -> bool:
+    normalized_account = _normalize_effective_account_name(account)
+    normalized_article_id = _normalize_article_id(article_id)
+    article_anchor_id = _article_anchor_id(normalized_article_id)
+    if not normalized_account or not article_anchor_id:
+        return False
+    analysis_root = get_analysis_output_root(config) / "article_analysis"
+    page_relative_path = _account_page_relative_path(normalized_account).lstrip("/")
+    page_path = analysis_root / page_relative_path
+    try:
+        page_html = page_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return f'id="{article_anchor_id}"' in page_html
+
+
 def _resolve_serverchan_single_article_analysis_url(config, article_info) -> str:
     if not isinstance(article_info, dict):
         return ""
@@ -1000,6 +1018,9 @@ def _resolve_serverchan_single_article_analysis_url(config, article_info) -> str
     article_id = _article_anchor_id(explicit_article_id)
     if not article_id:
         return ""
+    original_url = str(article_info.get("url") or "").strip()
+    if not _has_materialized_single_article_analysis_page(config, account, explicit_article_id):
+        return original_url
     summary_url = _resolve_serverchan_summary_url(config).rstrip("/")
     page_path = _account_page_relative_path(account).lstrip("/")
     return f"{summary_url}/{page_path}#{article_id}"

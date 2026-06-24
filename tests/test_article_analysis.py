@@ -6451,11 +6451,30 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             "url": "https://mp.weixin.qq.com/s/a?__biz=MjM5&mid=100&idx=1&sn=abc",
         }
 
-        desp = wechat_crawler.build_serverchan_markdown_articles(
-            [article],
-            batch_analysis=None,
-            config={"analysis_public_base_url": "https://wx.example.com"},
-        )
+        with tempfile.TemporaryDirectory() as d:
+            config = {
+                "analysis_public_base_url": "https://wx.example.com",
+                "analysis_output_dir": d,
+            }
+            article_analysis.persist_single_analysis_outputs(
+                config,
+                {
+                    "article_id": article["article_id"],
+                    "account": article["account"],
+                    "title": article["title"],
+                    "published_at": article["published_at"],
+                    "url": article["url"],
+                    "status": "ok",
+                    "summary": "已生成解读",
+                },
+            )
+            article_analysis.build_analysis_index_html(config)
+
+            desp = wechat_crawler.build_serverchan_markdown_articles(
+                [article],
+                batch_analysis=None,
+                config=config,
+            )
 
         expected_url = (
             "https://wx.example.com/article_analysis/"
@@ -6464,6 +6483,32 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
         )
         self.assertIn(f"- 号A | 2026-06-11 21:30 | [A 文]({expected_url})", desp)
         self.assertIn("[查看解读汇总](https://wx.example.com/article_analysis)", desp)
+
+    def test_build_serverchan_markdown_articles_falls_back_to_original_url_when_analysis_page_not_materialized(self):
+        article = {
+            "article_id": "serverchan-pending-article",
+            "account": "顽主实盘大赛",
+            "group": "测试分组",
+            "title": "小登：怕高都是苦命人",
+            "published_at": "2026-06-24 17:38",
+            "url": "https://mp.weixin.qq.com/s/K3vHzfOxQ4o9sm9N6pHisA",
+        }
+
+        with tempfile.TemporaryDirectory() as d:
+            desp = wechat_crawler.build_serverchan_markdown_articles(
+                [article],
+                batch_analysis=None,
+                config={
+                    "analysis_public_base_url": "https://wx.example.com",
+                    "analysis_output_dir": d,
+                },
+            )
+
+        self.assertIn(
+            "- 顽主实盘大赛 | 2026-06-24 17:38 | [小登：怕高都是苦命人](https://mp.weixin.qq.com/s/K3vHzfOxQ4o9sm9N6pHisA)",
+            desp,
+        )
+        self.assertNotIn("#article-serverchan-pending-article", desp)
 
     def test_build_serverchan_markdown_articles_escapes_markdown_special_chars_in_title(self):
         article = {
@@ -6475,11 +6520,30 @@ class TestCrawlerBatchAnalysisIntegration(unittest.TestCase):
             "url": "https://mp.weixin.qq.com/s/escaped-title",
         }
 
-        desp = wechat_crawler.build_serverchan_markdown_articles(
-            [article],
-            batch_analysis=None,
-            config={"analysis_public_base_url": "https://wx.example.com"},
-        )
+        with tempfile.TemporaryDirectory() as d:
+            config = {
+                "analysis_public_base_url": "https://wx.example.com",
+                "analysis_output_dir": d,
+            }
+            article_analysis.persist_single_analysis_outputs(
+                config,
+                {
+                    "article_id": article["article_id"],
+                    "account": article["account"],
+                    "title": article["title"],
+                    "published_at": article["published_at"],
+                    "url": article["url"],
+                    "status": "ok",
+                    "summary": "已生成解读",
+                },
+            )
+            article_analysis.build_analysis_index_html(config)
+
+            desp = wechat_crawler.build_serverchan_markdown_articles(
+                [article],
+                batch_analysis=None,
+                config=config,
+            )
 
         expected_url = (
             "https://wx.example.com/article_analysis/"
