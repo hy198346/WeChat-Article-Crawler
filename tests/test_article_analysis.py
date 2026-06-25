@@ -3798,6 +3798,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn('const REANALYZE_API_PATH = "/api/reanalyze";', html)
             self.assertIn("function resolveReanalyzeApiUrl()", html)
             self.assertIn("window.location.origin", html)
+            self.assertIn("new URL(configuredUrl)", html)
+            self.assertIn("target.origin !== origin", html)
             self.assertIn('fetch(resolveReanalyzeApiUrl()', html)
 
     def test_build_analysis_index_html_injects_reanalyze_status_styles(self):
