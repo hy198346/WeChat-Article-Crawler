@@ -137,7 +137,7 @@ curl http://192.168.9.158:11434/api/tags
 默认按以下优先级解析本地兜底模型地址：
 
 - `config.json.analysis_base_url`
-- `.env` / 环境变量 `LOCAL_LLM_BASE_URL`（推荐使用 `http://192.168.9.158:11434/v1`）
+- `.env` / 环境变量 `LOCAL_LLM_BASE_URL`（推荐使用 `http://192.168.9.158:11434`，不要追加 `/v1`）
 - `config.json.analysis_model`
 - `.env` / 环境变量 `LOCAL_LLM_MODEL`（推荐使用远端已安装模型，例如 `qwen3:4b`）
 - `.env` / 环境变量 `OLLAMA_BASE_URL`
@@ -147,7 +147,8 @@ curl http://192.168.9.158:11434/api/tags
 如果你已经在其他项目里使用 `LOCAL_LLM_BASE_URL`，本项目可直接复用，无需重复复制配置。
 
 - 本机运行 Ollama：可以显式设置 `analysis_base_url`
-- 局域网其他机器运行 Ollama：推荐在 `.env` 中设置 `LOCAL_LLM_BASE_URL=http://192.168.9.158:11434/v1`
+- 局域网其他机器运行 Ollama：推荐在 `.env` 中设置 `LOCAL_LLM_BASE_URL=http://192.168.9.158:11434`
+- 如果误配成 `/v1` 且目标服务只支持原生 Ollama 接口，程序会在 404/405 时自动回退到 `/api/chat`
 - 如果暂时不想启用 AI：保持 `analysis_enabled=false`
 
 下面这些示例命令用于“启用 AI 解读后”的场景。
@@ -205,7 +206,7 @@ python3 scripts/wechat_article_crawler/wechat_crawler.py --push-latest-all --acc
 |---------|------|
 | analysis_enabled | 是否启用 AI 解读 |
 | analysis_news_interpret_url | `news` 站元宝解读接口；也可通过 `NEWS_INTERPRET_BASE_URL` 自动补全 |
-| analysis_base_url | Ollama 服务地址 |
+| analysis_base_url | Ollama 服务地址，推荐写到主机根路径，如 `http://192.168.9.158:11434` |
 | analysis_model | 使用的模型名，支持被环境变量覆盖 |
 | analysis_timeout_seconds | 单次调用超时 |
 | analysis_max_chars | 送入模型的 Markdown 最大长度 |
@@ -390,7 +391,7 @@ Watchdog 的可选环境变量在 `.env.example` 里（默认会自动读取根�
 | analysis_enabled | 可选 | false | 是否启用 Ollama 文章解读，默认关闭以避免旧配置/空配置误触发 |
 | analysis_push_batch | 可选 | true | 批量推送时是否追加“本轮解读” |
 | analysis_base_url | 可选 | http://192.168.9.158:11434 | Ollama 服务地址，支持被环境变量覆盖 |
-| analysis_model | 可选 | qwen2.5-coder:14b-cpu | 文章解读模型 |
+| analysis_model | 可选 | qwen3:4b | 文章解读模型 |
 | analysis_timeout_seconds | 可选 | 30 | 单次 AI 调用超时秒数 |
 | analysis_max_chars | 可选 | 8000 | 送入模型的文章最大字符数 |
 | analysis_save_json | 可选 | true | 是否保存分析 JSON |

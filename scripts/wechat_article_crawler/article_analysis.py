@@ -1056,17 +1056,28 @@ def _post_openai_compat_chat(cfg, prompt: str):
     return message.get("content", "")
 
 
+def _is_unsupported_chat_endpoint_error(exc) -> bool:
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    message = str(exc)
+    return status in (404, 405) or "404" in message or "405" in message
+
+
 def call_ollama_chat(config, prompt: str):
     cfg = get_analysis_config(config)
     base_url = cfg["analysis_base_url"].rstrip("/")
     if base_url.endswith("/v1"):
-        return _post_openai_compat_chat(cfg, prompt)
+        try:
+            return _post_openai_compat_chat(cfg, prompt)
+        except requests.HTTPError as exc:
+            if _is_unsupported_chat_endpoint_error(exc):
+                native_cfg = dict(cfg)
+                native_cfg["analysis_base_url"] = base_url[:-3]
+                return _post_native_ollama_chat(native_cfg, prompt)
+            raise
     try:
         return _post_native_ollama_chat(cfg, prompt)
     except requests.HTTPError as exc:
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        message = str(exc)
-        if status in (404, 405) or "404" in message or "405" in message:
+        if _is_unsupported_chat_endpoint_error(exc):
             compat_cfg = dict(cfg)
             compat_cfg["analysis_base_url"] = base_url + "/v1"
             return _post_openai_compat_chat(compat_cfg, prompt)

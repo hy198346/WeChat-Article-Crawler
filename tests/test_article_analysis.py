@@ -375,6 +375,59 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_call_ollama_chat_falls_back_to_native_when_v1_unsupported(self):
+        calls = []
+
+        class HttpError(requests.HTTPError):
+            pass
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+            if url.endswith("/v1/chat/completions"):
+                class Resp404:
+                    status_code = 404
+
+                    def raise_for_status(self):
+                        err = HttpError("404 Client Error: Not Found")
+                        err.response = self
+                        raise err
+
+                return Resp404()
+
+            class Resp200:
+                status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "message": {
+                            "content": "{\"topic\":\"原生回退\",\"core_points\":[\"改走 api/chat\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                        }
+                    }
+
+            return Resp200()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            content = article_analysis.call_ollama_chat(
+                {
+                    "analysis_enabled": True,
+                    "analysis_base_url": "http://192.168.9.158:11434/v1",
+                    "analysis_model": "qwen3:4b",
+                },
+                "测试 prompt",
+            )
+            self.assertEqual(
+                calls[0][0], "http://192.168.9.158:11434/v1/chat/completions"
+            )
+            self.assertEqual(calls[1][0], "http://192.168.9.158:11434/api/chat")
+            self.assertIn("原生回退", content)
+        finally:
+            article_analysis.requests.post = old_post
+
     def test_call_ollama_chat_falls_back_to_openai_compat_when_api_chat_unsupported(self):
         calls = []
 
