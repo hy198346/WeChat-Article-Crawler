@@ -1844,7 +1844,7 @@ def _render_reanalyze_script_html(config):
         "    const response = await fetch(resolveReanalyzeApiUrl(), {",
         '      method: "POST",',
         '      headers: {"Content-Type": "application/json"},',
-        "      body: JSON.stringify({article_id, url, provider, provider_label: payloadBody.provider_label || providerMessages.label, provider_action_text: payloadBody.provider_action_text || providerMessages.pending}),",
+        "      body: JSON.stringify({article_id: articleId, url, provider, provider_label: payloadBody.provider_label || providerMessages.label, provider_action_text: payloadBody.provider_action_text || providerMessages.pending}),",
         "    });",
         "    const payload = await response.json();",
         "    if (payload && (payload.reason === 'need_login' || payload.need_login)) {",

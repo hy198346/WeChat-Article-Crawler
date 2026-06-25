@@ -3561,6 +3561,10 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn("function triggerReanalyzeRequest(", html)
             self.assertIn("等待登录后自动重试", html)
             self.assertIn("queueNeedLoginReanalyzeRetry(button", html)
+            self.assertIn(
+                "body: JSON.stringify({article_id: articleId, url, provider, provider_label: payloadBody.provider_label || providerMessages.label, provider_action_text: payloadBody.provider_action_text || providerMessages.pending}),",
+                html,
+            )
 
     def test_build_analysis_index_html_renders_need_login_qr_link_with_news_origin(self):
         with tempfile.TemporaryDirectory() as d:
