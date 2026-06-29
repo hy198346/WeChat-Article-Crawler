@@ -3854,6 +3854,8 @@ class TestBuildAnalysisIndexHtml(unittest.TestCase):
             self.assertIn('const REANALYZE_API_URL = "https://wx.coco777.vip/api/reanalyze";', html)
             self.assertIn('const REANALYZE_API_PATH = "/api/reanalyze";', html)
             self.assertIn("function resolveReanalyzeApiUrl()", html)
+            self.assertIn("window.location.protocol", html)
+            self.assertIn("!/^https?:$/i.test(protocol)", html)
             self.assertIn("window.location.origin", html)
             self.assertIn("new URL(configuredUrl)", html)
             self.assertIn("target.origin !== origin", html)

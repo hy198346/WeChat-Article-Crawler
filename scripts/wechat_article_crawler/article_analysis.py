@@ -1729,6 +1729,8 @@ def _render_reanalyze_script_html(config):
         "  const fallbackPath = REANALYZE_API_PATH || '/api/reanalyze';",
         "  const configuredUrl = REANALYZE_API_URL || fallbackPath;",
         "  try {",
+        "    const protocol = String((window.location && window.location.protocol) || '').trim();",
+        "    if (!/^https?:$/i.test(protocol)) return configuredUrl;",
         "    const origin = String((window.location && window.location.origin) || '').trim();",
         "    if (!origin) return configuredUrl;",
         "    if (/^https?:\\/\\//i.test(configuredUrl)) {",
