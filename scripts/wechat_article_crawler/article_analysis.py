@@ -772,7 +772,23 @@ def _coerce_market_style_single_analysis(data: dict):
 
 
 def _parse_single_analysis(content: str):
-    data = json.loads(content)
+    text = str(content or "").strip()
+    if not text:
+        return {"status": "skipped", "reason": "empty_analysis"}
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if fence_match:
+        fenced = str(fence_match.group(1) or "").strip()
+        if fenced:
+            text = fenced
+    if not text.startswith("{"):
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            text = text[start : end + 1].strip()
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {"status": "skipped", "reason": "empty_analysis"}
     summary = _normalize_summary_candidates(
         data.get("summary"),
         data.get("content"),
@@ -1015,8 +1031,9 @@ def _analyze_single_article_with_local_llm(config, article, article_id: str):
 
 
 def _post_native_ollama_chat(cfg, prompt: str):
+    endpoint_url = cfg["analysis_base_url"].rstrip("/") + "/api/chat"
     response = requests.post(
-        cfg["analysis_base_url"].rstrip("/") + "/api/chat",
+        endpoint_url,
         json={
             "model": cfg["analysis_model"],
             "stream": False,
@@ -1024,14 +1041,17 @@ def _post_native_ollama_chat(cfg, prompt: str):
         },
         timeout=cfg["analysis_timeout_seconds"],
     )
-    response.raise_for_status()
-    data = response.json()
-    return data.get("message", {}).get("content", "")
+    data = _load_ollama_json_response(response, endpoint_url)
+    content = str((data.get("message") or {}).get("content") or "")
+    if not content.strip():
+        raise ValueError(f"empty_message_content:{endpoint_url}")
+    return content
 
 
 def _post_openai_compat_chat(cfg, prompt: str):
+    endpoint_url = cfg["analysis_base_url"].rstrip("/") + "/chat/completions"
     response = requests.post(
-        cfg["analysis_base_url"].rstrip("/") + "/chat/completions",
+        endpoint_url,
         json={
             "model": cfg["analysis_model"],
             "temperature": 0,
@@ -1047,13 +1067,30 @@ def _post_openai_compat_chat(cfg, prompt: str):
         headers={"Authorization": "Bearer ollama"},
         timeout=cfg["analysis_timeout_seconds"],
     )
-    response.raise_for_status()
-    data = response.json()
+    data = _load_ollama_json_response(response, endpoint_url)
     choices = data.get("choices") or []
     if not choices:
-        return ""
+        raise ValueError(f"empty_choices:{endpoint_url}")
     message = choices[0].get("message") or {}
-    return message.get("content", "")
+    content = str(message.get("content") or "")
+    if not content.strip():
+        raise ValueError(f"empty_message_content:{endpoint_url}")
+    return content
+
+
+def _load_ollama_json_response(response, endpoint_url: str):
+    response.raise_for_status()
+    has_text = hasattr(response, "text")
+    body_text = str(getattr(response, "text", "") or "") if has_text else ""
+    try:
+        return response.json()
+    except ValueError as exc:
+        if has_text and not body_text.strip():
+            raise ValueError(f"empty_json_response:{endpoint_url}") from exc
+        body_prefix = re.sub(r"\s+", " ", body_text)[:160]
+        raise ValueError(
+            f"invalid_json_response:{endpoint_url}:{exc}:body_prefix={body_prefix}"
+        ) from exc
 
 
 def _is_unsupported_chat_endpoint_error(exc) -> bool:
@@ -1074,6 +1111,15 @@ def call_ollama_chat(config, prompt: str):
                 native_cfg["analysis_base_url"] = base_url[:-3]
                 return _post_native_ollama_chat(native_cfg, prompt)
             raise
+        except ValueError as exc:
+            native_cfg = dict(cfg)
+            native_cfg["analysis_base_url"] = base_url[:-3]
+            try:
+                return _post_native_ollama_chat(native_cfg, prompt)
+            except requests.HTTPError as fallback_exc:
+                if _is_unsupported_chat_endpoint_error(fallback_exc):
+                    raise exc
+                raise
     try:
         return _post_native_ollama_chat(cfg, prompt)
     except requests.HTTPError as exc:
@@ -1082,6 +1128,15 @@ def call_ollama_chat(config, prompt: str):
             compat_cfg["analysis_base_url"] = base_url + "/v1"
             return _post_openai_compat_chat(compat_cfg, prompt)
         raise
+    except ValueError as exc:
+        compat_cfg = dict(cfg)
+        compat_cfg["analysis_base_url"] = base_url + "/v1"
+        try:
+            return _post_openai_compat_chat(compat_cfg, prompt)
+        except requests.HTTPError as fallback_exc:
+            if _is_unsupported_chat_endpoint_error(fallback_exc):
+                raise exc
+            raise
 
 
 def analyze_single_article(config, article):

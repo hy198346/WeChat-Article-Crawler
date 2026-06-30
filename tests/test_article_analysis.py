@@ -483,6 +483,128 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_call_ollama_chat_falls_back_to_openai_compat_when_api_chat_returns_empty_json_body(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+            if url.endswith("/api/chat"):
+                class Resp200Empty:
+                    status_code = 200
+                    text = ""
+
+                    def raise_for_status(self):
+                        return None
+
+                    def json(self):
+                        raise __import__("json").JSONDecodeError("Expecting value", self.text, 0)
+
+                return Resp200Empty()
+
+            class Resp200:
+                status_code = 200
+                text = (
+                    '{"choices":[{"message":{"content":"{\\"topic\\":\\"自动回退\\",'
+                    '\\"core_points\\":[\\"空响应后改走 openai compat\\"],'
+                    '\\"audience\\":\\"测试者\\",\\"risks\\":[\\"无\\"]}"}}]}'
+                )
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"topic\":\"自动回退\",\"core_points\":[\"空响应后改走 openai compat\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                                }
+                            }
+                        ]
+                    }
+
+            return Resp200()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            content = article_analysis.call_ollama_chat(
+                {
+                    "analysis_enabled": True,
+                    "analysis_base_url": "http://192.168.9.158:11434",
+                    "analysis_model": "qwen3:4b",
+                },
+                "测试 prompt",
+            )
+            self.assertEqual(calls[0][0], "http://192.168.9.158:11434/api/chat")
+            self.assertEqual(
+                calls[1][0], "http://192.168.9.158:11434/v1/chat/completions"
+            )
+            self.assertIn("自动回退", content)
+        finally:
+            article_analysis.requests.post = old_post
+
+    def test_call_ollama_chat_falls_back_to_openai_compat_when_api_chat_returns_empty_content(self):
+        calls = []
+
+        def fake_post(url, json=None, timeout=0, headers=None):
+            calls.append((url, json, timeout, headers))
+            if url.endswith("/api/chat"):
+                class Resp200EmptyContent:
+                    status_code = 200
+                    text = '{"message":{"content":""}}'
+
+                    def raise_for_status(self):
+                        return None
+
+                    def json(self):
+                        return {"message": {"content": ""}}
+
+                return Resp200EmptyContent()
+
+            class Resp200:
+                status_code = 200
+                text = (
+                    '{"choices":[{"message":{"content":"{\\"topic\\":\\"自动回退\\",'
+                    '\\"core_points\\":[\\"空内容后改走 openai compat\\"],'
+                    '\\"audience\\":\\"测试者\\",\\"risks\\":[\\"无\\"]}"}}]}'
+                )
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"topic\":\"自动回退\",\"core_points\":[\"空内容后改走 openai compat\"],\"audience\":\"测试者\",\"risks\":[\"无\"]}"
+                                }
+                            }
+                        ]
+                    }
+
+            return Resp200()
+
+        old_post = article_analysis.requests.post
+        article_analysis.requests.post = fake_post
+        try:
+            content = article_analysis.call_ollama_chat(
+                {
+                    "analysis_enabled": True,
+                    "analysis_base_url": "http://192.168.9.158:11434",
+                    "analysis_model": "qwen3:4b",
+                },
+                "测试 prompt",
+            )
+            self.assertEqual(calls[0][0], "http://192.168.9.158:11434/api/chat")
+            self.assertEqual(
+                calls[1][0], "http://192.168.9.158:11434/v1/chat/completions"
+            )
+            self.assertIn("自动回退", content)
+        finally:
+            article_analysis.requests.post = old_post
+
     def test_analyze_single_article_timeout_returns_skipped(self):
         def fake_post(url, json=None, timeout=0):
             raise article_analysis.requests.Timeout("boom")
@@ -1601,6 +1723,61 @@ class TestArticleAnalysis(unittest.TestCase):
                 self.assertEqual(result["reason"], "empty_analysis")
                 self.assertEqual(result["title"], "空分析标题")
                 self.assertEqual(result["url"], "https://mp.weixin.qq.com/s/empty-analysis")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_local_llm_accepts_json_code_fence_payload(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: (
+            "```json\n"
+            "{\"summary\":\"代码块里的有效总结\",\"core_points\":[\"提取 JSON 成功\"]}\n"
+            "```"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "代码块输出标题",
+                        "published_at": "2026-06-13 12:15",
+                        "url": "https://mp.weixin.qq.com/s/code-fence-analysis",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["summary"], "代码块里的有效总结")
+                self.assertEqual(result["core_points"], ["提取 JSON 成功"])
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
+    def test_analyze_single_article_local_llm_rejects_blank_string_payload(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: "   "
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "测试号",
+                        "title": "空白输出标题",
+                        "published_at": "2026-06-13 12:15",
+                        "url": "https://mp.weixin.qq.com/s/blank-analysis",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["reason"], "empty_analysis")
         finally:
             article_analysis.call_ollama_chat = old_local
 
@@ -4575,6 +4752,38 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
         finally:
             wechat_crawler.requests.get = old_get
 
+    def test_fetch_article_markdown_raises_explicit_error_on_empty_article_content(self):
+        class Resp:
+            text = """
+            <html>
+              <head><title>空正文文章</title></head>
+              <body>
+                <div id="js_name">测试公众号</div>
+                <div id="js_content"></div>
+                <script>var publish_time = 1781222400;</script>
+              </body>
+            </html>
+            """
+            encoding = "utf-8"
+
+        old_get = wechat_crawler.requests.get
+        try:
+            wechat_crawler.requests.get = lambda url, headers=None: Resp()
+            with self.assertRaisesRegex(RuntimeError, "wechat_article_empty_content"):
+                wechat_crawler.fetch_article_markdown(
+                    {
+                        "title": "Unknown",
+                        "link": "https://mp.weixin.qq.com/s/test-empty-content",
+                        "create_time": 0,
+                        "digest": "",
+                        "author": "",
+                    },
+                    headers={"User-Agent": "test"},
+                    account_name=None,
+                )
+        finally:
+            wechat_crawler.requests.get = old_get
+
     def test_run_extract_from_url_attaches_analysis(self):
         persist_calls = []
         refresh_calls = []
@@ -5159,6 +5368,24 @@ class TestCrawlerSingleAnalysisIntegration(unittest.TestCase):
             self.assertEqual(result["status"], "error")
             self.assertEqual(result["article_id"], "aid-login")
             self.assertEqual(result["reason"], "wechat_auth_required")
+        finally:
+            if old_runner is not None:
+                wechat_crawler.run_reanalyze_from_url = old_runner
+
+    def test_handle_reanalyze_api_request_returns_explicit_empty_content_error_from_fetch(self):
+        old_runner = getattr(wechat_crawler, "run_reanalyze_from_url", None)
+        try:
+            def raise_empty(*args, **kwargs):
+                raise RuntimeError("wechat_article_empty_content")
+
+            wechat_crawler.run_reanalyze_from_url = raise_empty
+            result = wechat_crawler.handle_reanalyze_api_request(
+                {"url": "https://mp.weixin.qq.com/s/test", "provider": "ollama"},
+                config={},
+                request_headers={"Origin": "http://127.0.0.1:8765"},
+            )
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["reason"], "wechat_article_empty_content")
         finally:
             if old_runner is not None:
                 wechat_crawler.run_reanalyze_from_url = old_runner

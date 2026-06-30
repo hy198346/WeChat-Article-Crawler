@@ -292,7 +292,18 @@ def _is_usable_cached_reanalyze_markdown(markdown_text: str) -> bool:
     for label in ("Date", "Link", "Account"):
         if _parse_cached_markdown_header(text, label):
             header_hits += 1
-    return header_hits >= 2
+    if header_hits < 2:
+        return False
+    body_hits = 0
+    for raw_line in text.splitlines()[1:]:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if re.match(r"^\*\*(Date|Link|Account|Summary):\*\*", line):
+            continue
+        body_hits += 1
+        break
+    return body_hits >= 1
 
 
 def _load_cached_reanalyze_article(config, article_id=None, article_url=None, account_name=None):
@@ -879,6 +890,8 @@ def fetch_article_markdown(article, headers, account_name=None):
         markdown_content += f"**Summary:** {digest}\n"
     markdown_content += "\n"
     markdown_content += html_to_markdown(main_content)
+    if not _is_usable_cached_reanalyze_markdown(markdown_content):
+        raise RuntimeError("wechat_article_empty_content")
 
     return {
         "title": title,
@@ -1277,6 +1290,7 @@ def _classify_async_analysis_failure(reason: str) -> str:
     external_markers = (
         "wechat_auth_required",
         "wechat_security_verification_required",
+        "wechat_article_empty_content",
         "invalid_url",
         "login_required",
         "need_login",
@@ -2223,6 +2237,7 @@ def handle_reanalyze_api_request(payload, config, request_headers=None):
         if explicit_reason in (
             "wechat_auth_required",
             "wechat_security_verification_required",
+            "wechat_article_empty_content",
             "invalid_provider",
         ):
             return {"status": "error", "article_id": article_id, "reason": explicit_reason}
@@ -2320,6 +2335,7 @@ def handle_fetch_latest_all_api_request(payload, config, request_headers=None):
         if explicit_reason in (
             "wechat_auth_required",
             "wechat_security_verification_required",
+            "wechat_article_empty_content",
         ):
             return {"status": "error", "reason": explicit_reason}
         return {"status": "error", "reason": f"fetch_latest_all_failed:{type(exc).__name__}:{exc}"}
