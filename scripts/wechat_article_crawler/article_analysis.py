@@ -400,6 +400,37 @@ def _has_meaningful_single_analysis_content(
     )
 
 
+def _coerce_plain_text_single_analysis(text: str):
+    summary = _normalize_summary_text(text)
+    if not _has_meaningful_summary_text(summary):
+        return None
+    lowered = " ".join(summary.lower().split())
+    rejected_markers = (
+        "client error",
+        "server error",
+        "traceback (most recent call last)",
+        "invalid_json_response:",
+        "empty_json_response:",
+        "empty_message_content:",
+        "connection aborted",
+        "connection refused",
+        "max retries exceeded",
+        "<!doctype html",
+        "<html",
+        '"error":',
+    )
+    if any(marker in lowered for marker in rejected_markers):
+        return None
+    return {
+        "status": "ok",
+        "summary": summary,
+        "topic": "",
+        "core_points": [],
+        "audience": "",
+        "risks": [],
+    }
+
+
 def _has_meaningful_schema_drift_candidate(value, *, list_like: bool = False) -> bool:
     if value is None:
         return False
@@ -788,6 +819,9 @@ def _parse_single_analysis(content: str):
     try:
         data = json.loads(text)
     except ValueError:
+        coerced = _coerce_plain_text_single_analysis(text)
+        if isinstance(coerced, dict):
+            return coerced
         return {"status": "skipped", "reason": "empty_analysis"}
     summary = _normalize_summary_candidates(
         data.get("summary"),

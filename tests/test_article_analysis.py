@@ -1756,6 +1756,38 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.call_ollama_chat = old_local
 
+    def test_analyze_single_article_local_llm_accepts_plain_text_summary(self):
+        old_local = article_analysis.call_ollama_chat
+        article_analysis.call_ollama_chat = lambda config, prompt: (
+            "以下是对文章的客观总结。\n\n"
+            "文章主线围绕盘前热点、公告精选和全球市场展开，重点梳理半导体、AI硬件与医药方向，"
+            "同时结合重要事件和公司映射帮助读者快速建立盘前观察框架。\n\n"
+            "文中还补充了公告、连板梯队、人气热榜与海外市场表现，便于在同一视角下同步理解题材热度、"
+            "风险提示与次日交易关注点。"
+        )
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                result = article_analysis.analyze_single_article(
+                    {
+                        "analysis_enabled": True,
+                        "analysis_output_dir": d,
+                        "analysis_news_interpret_url": "",
+                    },
+                    {
+                        "account": "盘前纪要",
+                        "title": "6月30日盘前纪要",
+                        "published_at": "2026-06-30 07:22",
+                        "url": "https://mp.weixin.qq.com/s/plain-text-analysis",
+                        "markdown": "# 正文",
+                    },
+                )
+
+                self.assertEqual(result["status"], "ok")
+                self.assertIn("盘前热点", result["summary"])
+                self.assertEqual(result["source"], "local")
+        finally:
+            article_analysis.call_ollama_chat = old_local
+
     def test_analyze_single_article_local_llm_rejects_blank_string_payload(self):
         old_local = article_analysis.call_ollama_chat
         article_analysis.call_ollama_chat = lambda config, prompt: "   "
