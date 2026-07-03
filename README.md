@@ -139,7 +139,7 @@ curl http://192.168.9.158:11434/api/tags
 - `config.json.analysis_base_url`
 - `.env` / 环境变量 `LOCAL_LLM_BASE_URL`（推荐使用 `http://192.168.9.158:11434`，不要追加 `/v1`）
 - `config.json.analysis_model`
-- `.env` / 环境变量 `LOCAL_LLM_MODEL`（推荐使用远端已安装模型，例如 `qwen3:4b`）
+- `.env` / 环境变量 `LOCAL_LLM_MODEL`（推荐使用远端已安装模型，例如 `qwen2.5-coder:14b-cpu`）
 - `.env` / 环境变量 `OLLAMA_BASE_URL`
 - `.env` / 环境变量 `OLLAMA_MODEL`
 - 默认值 `http://192.168.9.158:11434`
@@ -370,6 +370,19 @@ launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecraw
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.wechat.articlecrawler.watchdog.plist
 ```
 
+公众号目录相关三服务如果只想按当前这套 `launchd` 方式一键装好，可以直接执行：
+
+```bash
+bin/install_analysis_services_launchd.sh
+```
+
+这个脚本会自动：
+
+- 创建 `logs/`、`output/` 和 `~/Library/LaunchAgents/`
+- 复制并重装 `analysis-queue`
+- 复制并重装 `analysis-static`
+- 复制并重装 `reanalyze-api`
+
 4. 查看状态/日志：
 
 - 状态：`launchctl print "gui/$(id -u)/com.wechat.articlecrawler.runproject"`、`...analysis-queue`、`...analysis-static`、`...reanalyze-api`、`...watchdog`
@@ -391,7 +404,7 @@ Watchdog 的可选环境变量在 `.env.example` 里（默认会自动读取根�
 | analysis_enabled | 可选 | false | 是否启用 Ollama 文章解读，默认关闭以避免旧配置/空配置误触发 |
 | analysis_push_batch | 可选 | true | 批量推送时是否追加“本轮解读” |
 | analysis_base_url | 可选 | http://192.168.9.158:11434 | Ollama 服务地址，支持被环境变量覆盖 |
-| analysis_model | 可选 | qwen3:4b | 文章解读模型 |
+| analysis_model | 可选 | qwen2.5-coder:14b-cpu | 文章解读模型 |
 | analysis_timeout_seconds | 可选 | 30 | 单次 AI 调用超时秒数 |
 | analysis_max_chars | 可选 | 8000 | 送入模型的文章最大字符数 |
 | analysis_save_json | 可选 | true | 是否保存分析 JSON |

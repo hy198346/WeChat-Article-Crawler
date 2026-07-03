@@ -53,6 +53,8 @@ class TestAnalysisQueueSchedule(unittest.TestCase):
         self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-queue.plist", content)
         self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.analysis-static.plist", content)
         self.assertIn("launchctl bootstrap \"gui/$(id -u)\" ~/Library/LaunchAgents/com.wechat.articlecrawler.reanalyze-api.plist", content)
+        self.assertIn("bin/install_analysis_services_launchd.sh", content)
+        self.assertIn("公众号目录相关三服务如果只想按当前这套 `launchd` 方式一键装好", content)
         self.assertIn("fresh install 时先在项目根目录执行 `mkdir -p logs output`", content)
         self.assertIn("cd /path/to/WeChat-Article-Crawler && mkdir -p logs output", content)
         self.assertLess(
