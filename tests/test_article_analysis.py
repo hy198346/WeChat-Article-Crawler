@@ -293,6 +293,41 @@ class TestArticleAnalysis(unittest.TestCase):
         finally:
             article_analysis.requests.post = old_post
 
+    def test_normalize_remote_summary_analysis_rejects_verification_challenge_text(self):
+        article = {
+            "title": "银行理财6月新发更多了，但赚的稳不稳？",
+            "account": "Wind万得",
+            "published_at": "2026-07-10 06:35",
+            "date": "2026-07-10",
+            "url": "https://mp.weixin.qq.com/s/o8TFNZpFnGlRBZ5zKdYu4w",
+        }
+
+        out = article_analysis._normalize_remote_summary_analysis(
+            {
+                "summary": (
+                    "属于动物的。请选择所有符合上文描述的图片，并拖拽到下方\n"
+                    "拖拽到这里\n刷新\n反馈\n提交"
+                )
+            },
+            article,
+        )
+
+        self.assertEqual(out["status"], "skipped")
+        self.assertEqual(out["reason"], "verify_challenge")
+
+    def test_valid_cached_single_analysis_rejects_verification_challenge_text(self):
+        cached = {
+            "status": "ok",
+            "article_id": "ab26d93206353396afa857fb55908de8acbfea19",
+            "summary": "体育运动常用的物品 请选择所有符合上文描述的图片，并拖拽到下方",
+            "topic": "",
+            "core_points": [],
+            "audience": "",
+            "risks": [],
+        }
+
+        self.assertFalse(article_analysis._is_valid_cached_single_analysis(cached))
+
     def test_analyze_single_article_persists_timeout_result_for_retry(self):
         old_call = article_analysis.call_ollama_chat
         try:

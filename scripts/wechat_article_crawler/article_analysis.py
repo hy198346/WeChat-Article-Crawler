@@ -246,6 +246,8 @@ def _is_valid_cached_single_analysis(data):
     if not isinstance(data.get("article_id"), str) or not data.get("article_id").strip():
         return False
     summary = _normalize_summary_text(data.get("summary"))
+    if _looks_like_verification_challenge_text(summary):
+        return False
     if "topic" not in data or not isinstance(data.get("topic"), str):
         return False
     if "audience" not in data or not isinstance(data.get("audience"), str):
@@ -359,6 +361,29 @@ def _normalize_summary_candidates(*values):
     return "\n".join(parts)
 
 
+def _looks_like_verification_challenge_text(value) -> bool:
+    text = _normalize_summary_text(value)
+    if not text:
+        return False
+    compact = re.sub(r"\s+", "", text)
+    strong_markers = (
+        "请选择所有符合上文描述的图片",
+        "并拖拽到下方",
+        "拖拽到这里",
+        "滑块验证",
+        "拼图验证",
+        "人机验证",
+        "行为验证",
+        "安全验证",
+        "请完成验证",
+    )
+    if any(marker in text for marker in strong_markers):
+        return True
+    weak_markers = ("拖拽", "图片", "刷新", "反馈", "提交", "验证", "校验", "captcha")
+    weak_hits = sum(1 for marker in weak_markers if marker.lower() in compact.lower())
+    return weak_hits >= 3 and len(compact) <= 200
+
+
 def _has_meaningful_summary_text(value) -> bool:
     text = _normalize_summary_text(value)
     if not text:
@@ -403,6 +428,8 @@ def _has_meaningful_single_analysis_content(
 def _coerce_plain_text_single_analysis(text: str):
     summary = _normalize_summary_text(text)
     if not _has_meaningful_summary_text(summary):
+        return None
+    if _looks_like_verification_challenge_text(summary):
         return None
     lowered = " ".join(summary.lower().split())
     rejected_markers = (
@@ -605,6 +632,8 @@ def _build_single_article_prompt(article, cfg):
 def _is_low_quality_single_article_summary(text: str) -> bool:
     s = _normalize_summary_text(text)
     if not s:
+        return True
+    if _looks_like_verification_challenge_text(s):
         return True
     compact = re.sub(r"\s+", "", s)
     detail_hits = sum(1 for kw in ("主结论", "逻辑", "产业链", "技术", "公司", "趋势", "驱动", "竞争") if kw in s)
@@ -835,6 +864,8 @@ def _parse_single_analysis(content: str):
         data.get("core_trend"),
         data.get("platform_response"),
     )
+    if _looks_like_verification_challenge_text(summary):
+        return {"status": "skipped", "reason": "verify_challenge"}
     core_points = _normalize_list(
         data.get("core_points") or data.get("key_points") or data.get("application_types")
     )
@@ -909,7 +940,11 @@ def _normalize_remote_summary_analysis(result, article):
         payload["need_login"] = True
     if need_login_url:
         payload["needLoginUrl"] = need_login_url
-    if _has_meaningful_summary_text(summary):
+    if _looks_like_verification_challenge_text(summary):
+        payload["summary"] = ""
+        payload["status"] = "skipped"
+        payload["reason"] = remote_reason or "verify_challenge"
+    elif _has_meaningful_summary_text(summary):
         payload["status"] = "ok"
     else:
         payload["summary"] = ""
