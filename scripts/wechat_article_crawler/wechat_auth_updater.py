@@ -215,6 +215,7 @@ async def refresh_wechat_auth(
     keep_open_on_fail: bool = False,
     keep_open: bool = False,
     keep_open_seconds: int = 120,
+    stability_wait_seconds: int = 5,
 ) -> Dict[str, Any]:
     from playwright.async_api import async_playwright
 
@@ -260,6 +261,8 @@ async def refresh_wechat_auth(
         logs: List[str] = []
         failed = False
         page = None
+        pending_popup_tasks: set = set()
+        listener_refs = {}
 
         try:
             page = context.pages[0] if context.pages else await context.new_page()
@@ -274,34 +277,75 @@ async def refresh_wechat_auth(
                     pass
 
             def handle_request(request):
-                url = request.url
-                token = _extract_token_from_url(url)
-                if token:
-                    latest["token"] = token
-                if "getmsg" in url and "__biz" in url:
-                    latest["getmsg"] = _extract_getmsg_params(url)
+                try:
+                    url = request.url
+                    token = _extract_token_from_url(url)
+                    if token:
+                        latest["token"] = token
+                    if "getmsg" in url and "__biz" in url:
+                        latest["getmsg"] = _extract_getmsg_params(url)
+                except Exception:
+                    pass
 
             page.on("request", handle_request)
             page.on("console", handle_console)
+            listener_refs = {"request": handle_request, "console": handle_console}
 
             def handle_popup(popup):
-                async def _handle() -> None:
+                async def _handle_safe() -> None:
                     try:
-                        await popup.wait_for_load_state("domcontentloaded", timeout=5000)
+                        try:
+                            await popup.wait_for_load_state("domcontentloaded", timeout=5000)
+                        except Exception:
+                            pass
+                        try:
+                            await _try_accept_agreement(popup)
+                        except Exception:
+                            pass
+                        popup_url = ""
+                        try:
+                            popup_url = popup.url or ""
+                        except Exception:
+                            popup_url = ""
+                        looks_like_agreement = False
+                        try:
+                            markers = ["agree", "agreement", "protocol", "license", "service", "contract", "terms"]
+                            content_snippet = ""
+                            try:
+                                content_snippet = (await popup.content())[:3000]
+                            except Exception:
+                                content_snippet = ""
+                            looks_like_agreement = any(m in popup_url for m in markers) or ("协议" in content_snippet) or ("同意" in content_snippet) or ("服务条款" in content_snippet)
+                        except Exception:
+                            looks_like_agreement = False
+                        if looks_like_agreement:
+                            try:
+                                await asyncio.sleep(0.8)
+                                await popup.close(timeout=3000)
+                            except Exception:
+                                pass
+                        else:
+                            pass
                     except Exception:
                         pass
+                    finally:
+                        try:
+                            pending_popup_tasks.discard(asyncio.current_task())
+                        except Exception:
+                            pass
+
+                task = asyncio.create_task(_handle_safe())
+                pending_popup_tasks.add(task)
+                def _task_done(t):
                     try:
-                        await _try_accept_agreement(popup)
+                        pending_popup_tasks.discard(t)
+                        t.result()
                     except Exception:
                         pass
-                    try:
-                        await asyncio.sleep(0.2)
-                        await popup.close()
-                    except Exception:
-                        pass
-                asyncio.create_task(_handle())
+                task.add_done_callback(_task_done)
 
             page.on("popup", handle_popup)
+            listener_refs["popup"] = handle_popup
 
             urls = []
             if target_url:
@@ -364,11 +408,17 @@ async def refresh_wechat_auth(
                         pass
 
                 if not latest["token"]:
-                    token = _extract_token_from_url(page.url)
-                    if token:
-                        latest["token"] = token
+                    try:
+                        token = _extract_token_from_url(page.url)
+                        if token:
+                            latest["token"] = token
+                    except Exception:
+                        pass
 
                 if latest["token"]:
+                    if not headless:
+                        print(f"检测到 token，页面稳定化等待 {stability_wait_seconds} 秒...")
+                    await asyncio.sleep(max(1, int(stability_wait_seconds)))
                     break
 
                 if not headless:
@@ -420,18 +470,40 @@ async def refresh_wechat_auth(
         finally:
             if not (keep_open_on_fail and failed and (not headless)):
                 try:
-                    pages = context.pages
-                    for p0 in pages:
+                    if pending_popup_tasks:
                         try:
-                            p0.remove_listener("request", handle_request)
-                            await p0.close()
+                            await asyncio.wait_for(
+                                asyncio.gather(*pending_popup_tasks, return_exceptions=True),
+                                timeout=3,
+                            )
                         except Exception:
                             pass
+                        pending_popup_tasks.clear()
+                except Exception:
+                    pass
+                try:
+                    pages = list(context.pages)
+                    for p0 in reversed(pages):
+                        try:
+                            for ev_name, ev_handler in listener_refs.items():
+                                try:
+                                    p0.remove_listener(ev_name, ev_handler)
+                                except Exception:
+                                    pass
+                            await p0.close(timeout=5000)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
                     await asyncio.sleep(1.0)
-                    try:
-                        await context.close()
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(context.close(), timeout=15)
+                except Exception:
+                    pass
+                try:
                     await asyncio.sleep(0.5)
                 except Exception:
                     pass
@@ -458,6 +530,7 @@ def main() -> None:
     parser.add_argument("--keep-open-on-fail", action="store_true")
     parser.add_argument("--keep-open", action="store_true")
     parser.add_argument("--keep-open-seconds", type=int, default=120)
+    parser.add_argument("--stability-wait", type=int, default=5)
     args = parser.parse_args()
 
     latest = asyncio.run(
@@ -472,6 +545,7 @@ def main() -> None:
             keep_open_on_fail=args.keep_open_on_fail,
             keep_open=args.keep_open,
             keep_open_seconds=args.keep_open_seconds,
+            stability_wait_seconds=args.stability_wait,
         )
     )
     token = latest.get("token") or ""

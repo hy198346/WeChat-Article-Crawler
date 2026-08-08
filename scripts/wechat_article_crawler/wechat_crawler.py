@@ -3782,6 +3782,7 @@ def main():
     parser.add_argument("--refresh-keep-open-on-fail", action="store_true")
     parser.add_argument("--refresh-keep-open", action="store_true")
     parser.add_argument("--refresh-keep-open-seconds", type=int, default=120)
+    parser.add_argument("--refresh-stability-wait", type=int, default=5)
     parser.add_argument("--extract-latest", action="store_true")
     parser.add_argument("--push-latest-all", action="store_true")
     parser.add_argument("--article-url", type=str, default=None)
@@ -3851,6 +3852,7 @@ def main():
                     keep_open_on_fail=args.refresh_keep_open_on_fail,
                     keep_open=args.refresh_keep_open,
                     keep_open_seconds=args.refresh_keep_open_seconds,
+                    stability_wait_seconds=args.refresh_stability_wait,
                 )
             )
             config = load_json(CONFIG_FILE)
