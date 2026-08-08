@@ -609,10 +609,10 @@ def get_headers(cookie, token):
         "Sec-Fetch-Dest": "empty",
     }
 
-def get_articles(fakeid, token, cookie, begin=0, count=5):
+def get_articles(fakeid, token, cookie, begin=0, count=5, *, max_retry: int = 3):
     url = "https://mp.weixin.qq.com/cgi-bin/appmsgpublish"
     headers = get_headers(cookie, token)
-    
+
     params = {
         "sub": "list",
         "begin": str(begin),
@@ -621,69 +621,93 @@ def get_articles(fakeid, token, cookie, begin=0, count=5):
         "token": token,
         "lang": "zh_CN",
         "f": "json",
-        "ajax": "1"
+        "ajax": "1",
     }
-    
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        ct = (response.headers.get("Content-Type") or "").lower()
-        if "application/json" not in ct:
-            body = response.text or ""
-            if _looks_like_wechat_login_html(body):
-                _emit_auth_expired("non_json_login_page", f"status={response.status_code} content_type={ct}")
-                return [], 0, "auth_expired"
+
+    retry = 0
+    retryable_err = None
+    base_wait_s = 1.2
+    while True:
         try:
-            data = response.json()
-        except Exception as e:
-            body = response.text or ""
-            if _looks_like_wechat_login_html(body):
-                _emit_auth_expired("json_decode_login_page", str(e))
-                return [], 0, "auth_expired"
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            ct = (response.headers.get("Content-Type") or "").lower()
+            if "application/json" not in ct:
+                body = response.text or ""
+                if _looks_like_wechat_login_html(body):
+                    _emit_auth_expired("non_json_login_page", f"status={response.status_code} content_type={ct}")
+                    return [], 0, "auth_expired"
+            try:
+                data = response.json()
+            except Exception as e:
+                body = response.text or ""
+                if _looks_like_wechat_login_html(body):
+                    _emit_auth_expired("json_decode_login_page", str(e))
+                    return [], 0, "auth_expired"
+                print(f"请求失败: {e}")
+                return [], 0, None
+
+            if "base_resp" in data:
+                base = data["base_resp"] or {}
+                ret = int(base.get("ret") or 0)
+                if ret != 0:
+                    err_msg = str(base.get("err_msg") or "").lower()
+                    if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
+                        try:
+                            _emit_auth_expired("base_resp_invalid_session", json.dumps(base, ensure_ascii=False))
+                        except Exception:
+                            _emit_auth_expired("base_resp_invalid_session")
+                    is_freq = ret == 200013 or "freq" in err_msg or "frequency" in err_msg or "control" in err_msg
+                    is_retryable = is_freq or ret == -1 or "system" in err_msg or "timeout" in err_msg or "busy" in err_msg
+                    if is_retryable and retry < max_retry:
+                        retry += 1
+                        wait_s = base_wait_s * (2 ** (retry - 1))
+                        hint = "freq_control" if is_freq else f"ret={ret}"
+                        print(f"[Retry #{retry}/{max_retry}] appmsgpublish {hint}, wait {wait_s:.1f}s before retry: fakeid={fakeid}")
+                        time.sleep(wait_s)
+                        retryable_err = err_msg or f"ret={ret}"
+                        continue
+                    print(f"API Error: {base}")
+                    return [], 0, "freq_control" if is_freq else None
+
+            if "publish_page" in data:
+                publish_page = json.loads(data["publish_page"])
+                publish_list = publish_page.get("publish_list", [])
+                total_count = publish_page.get("total_count", 0)
+
+                articles = []
+                for publish_item in publish_list:
+                    publish_info = json.loads(publish_item.get("publish_info", "{}"))
+                    appmsg_info = publish_info.get("appmsg_info", [])
+                    for appmsg in appmsg_info:
+                        articles.append({
+                            "title": appmsg.get("title"),
+                            "link": appmsg.get("content_url"),
+                            "create_time": publish_info.get("sent_info", {}).get("time", 0),
+                            "digest": appmsg.get("digest", ""),
+                            "author": appmsg.get("author", ""),
+                        })
+
+                return articles, total_count, None
+            else:
+                print("未找到 publish_page 字段")
+                return [], 0, None
+
+        except requests.exceptions.RequestException as e:
+            if retry < max_retry:
+                retry += 1
+                wait_s = base_wait_s * (2 ** (retry - 1))
+                print(f"[Retry #{retry}/{max_retry}] network error {type(e).__name__}: {e}, wait {wait_s:.1f}s: fakeid={fakeid}")
+                time.sleep(wait_s)
+                retryable_err = f"network:{type(e).__name__}"
+                continue
             print(f"请求失败: {e}")
             return [], 0, None
-        
-        if "base_resp" in data and data["base_resp"]["ret"] != 0:
-            base = data["base_resp"] or {}
-            err_msg = str(base.get("err_msg") or "").lower()
-            if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
-                try:
-                    _emit_auth_expired("base_resp_invalid_session", json.dumps(base, ensure_ascii=False))
-                except Exception:
-                    _emit_auth_expired("base_resp_invalid_session")
-            print(f"API Error: {base}")
+        except Exception as e:
+            print(f"请求失败: {e}")
             return [], 0, None
-        
-        # publish_page 是一个 JSON 字符串，需要再次解析
-        if "publish_page" in data:
-            publish_page = json.loads(data["publish_page"])
-            publish_list = publish_page.get("publish_list", [])
-            total_count = publish_page.get("total_count", 0)
-            
-            # 从 publish_list 中提取所有文章
-            articles = []
-            for publish_item in publish_list:
-                publish_info = json.loads(publish_item.get("publish_info", "{}"))
-                appmsg_info = publish_info.get("appmsg_info", [])
-                for appmsg in appmsg_info:
-                    articles.append({
-                        "title": appmsg.get("title"),
-                        "link": appmsg.get("content_url"),
-                        "create_time": publish_info.get("sent_info", {}).get("time", 0),
-                        "digest": appmsg.get("digest", ""),
-                        "author": appmsg.get("author", "")
-                    })
-            
-            return articles, total_count, None
-        else:
-            print("未找到 publish_page 字段")
-            return [], 0, None
-            
-    except Exception as e:
-        print(f"请求失败: {e}")
-        return [], 0, None
 
-def search_accounts(query, token, cookie, begin=0, count=5):
+def search_accounts(query, token, cookie, begin=0, count=5, *, max_retry: int = 3):
     url = "https://mp.weixin.qq.com/cgi-bin/searchbiz"
     headers = get_headers(cookie, token)
     params = {
@@ -694,41 +718,64 @@ def search_accounts(query, token, cookie, begin=0, count=5):
         "token": token,
         "lang": "zh_CN",
         "f": "json",
-        "ajax": "1"
+        "ajax": "1",
     }
 
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        ct = (response.headers.get("Content-Type") or "").lower()
-        if "application/json" not in ct:
-            body = response.text or ""
-            if _looks_like_wechat_login_html(body):
-                _emit_auth_expired("non_json_login_page_searchbiz", f"status={response.status_code} content_type={ct}")
-                return []
+    retry = 0
+    base_wait_s = 1.0
+    while True:
         try:
-            data = response.json()
-        except Exception as e:
-            body = response.text or ""
-            if _looks_like_wechat_login_html(body):
-                _emit_auth_expired("json_decode_login_page_searchbiz", str(e))
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            ct = (response.headers.get("Content-Type") or "").lower()
+            if "application/json" not in ct:
+                body = response.text or ""
+                if _looks_like_wechat_login_html(body):
+                    _emit_auth_expired("non_json_login_page_searchbiz", f"status={response.status_code} content_type={ct}")
+                    return []
+            try:
+                data = response.json()
+            except Exception as e:
+                body = response.text or ""
+                if _looks_like_wechat_login_html(body):
+                    _emit_auth_expired("json_decode_login_page_searchbiz", str(e))
+                    return []
+                print(f"搜索公众号失败: {e}")
                 return []
+            if "base_resp" in data:
+                base = data["base_resp"] or {}
+                ret = int(base.get("ret") or 0)
+                if ret != 0:
+                    err_msg = str(base.get("err_msg") or "").lower()
+                    if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
+                        try:
+                            _emit_auth_expired("base_resp_invalid_session_searchbiz", json.dumps(base, ensure_ascii=False))
+                        except Exception:
+                            _emit_auth_expired("base_resp_invalid_session_searchbiz")
+                    is_freq = ret == 200013 or "freq" in err_msg or "frequency" in err_msg or "control" in err_msg
+                    is_retryable = is_freq or ret == -1 or "system" in err_msg or "timeout" in err_msg or "busy" in err_msg
+                    if is_retryable and retry < max_retry:
+                        retry += 1
+                        wait_s = base_wait_s * (2 ** (retry - 1))
+                        hint = "freq_control" if is_freq else f"ret={ret}"
+                        print(f"[Retry #{retry}/{max_retry}] searchbiz {hint}, wait {wait_s:.1f}s before retry: query={query!r}")
+                        time.sleep(wait_s)
+                        continue
+                    print(f"API Error: {base}")
+                    return []
+            return data.get("list", [])
+        except requests.exceptions.RequestException as e:
+            if retry < max_retry:
+                retry += 1
+                wait_s = base_wait_s * (2 ** (retry - 1))
+                print(f"[Retry #{retry}/{max_retry}] searchbiz network {type(e).__name__}: {e}, wait {wait_s:.1f}s: query={query!r}")
+                time.sleep(wait_s)
+                continue
             print(f"搜索公众号失败: {e}")
             return []
-        if "base_resp" in data and data["base_resp"].get("ret", 0) != 0:
-            base = data["base_resp"] or {}
-            err_msg = str(base.get("err_msg") or "").lower()
-            if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
-                try:
-                    _emit_auth_expired("base_resp_invalid_session_searchbiz", json.dumps(base, ensure_ascii=False))
-                except Exception:
-                    _emit_auth_expired("base_resp_invalid_session_searchbiz")
-            print(f"API Error: {base}")
+        except Exception as e:
+            print(f"搜索公众号失败: {e}")
             return []
-        return data.get("list", [])
-    except Exception as e:
-        print(f"搜索公众号失败: {e}")
-        return []
 
 def resolve_fakeid(target_account_name, token, cookie, target_fakeid=None):
     if target_fakeid:
@@ -2564,9 +2611,9 @@ def load_accounts_list(config, accounts_file_override: str = None):
     return out
 
 def _extract_latest_payload_for_account(fakeid: str, account_name: str, token: str, cookie: str, headers):
-    articles, _, _ = get_articles(fakeid, token, cookie, begin=0, count=20)
+    articles, _, err_code = get_articles(fakeid, token, cookie, begin=0, count=20)
     if not articles:
-        return None
+        return {"_error": str(err_code or "empty")} if err_code else None
 
     chosen = None
     for a in articles:
@@ -2964,7 +3011,15 @@ def run_push_latest_all(
         if g not in group_rank:
             group_rank[g] = len(group_rank)
 
-    for it in accounts:
+    total_accounts = len(accounts)
+    freq_control_hits = 0
+    api_error_hits = 0
+    resolve_fakeid_fail = 0
+    per_account_sleep_s = float(os.environ.get("WECHAT_PUSH_LATEST_PER_ACCOUNT_SLEEP_S", "0.4") or "0.4")
+    if per_account_sleep_s < 0:
+        per_account_sleep_s = 0.0
+
+    for idx, it in enumerate(accounts):
         name = (it.get("name") or "").strip()
         fakeid = (it.get("fakeid") or "").strip()
         latest_url = (it.get("latest_url") or "").strip()
@@ -2972,9 +3027,18 @@ def run_push_latest_all(
         if latest_url:
             fakeid = ""
         elif not fakeid:
-            fakeid = resolve_fakeid(name, token, cookie, target_fakeid=None)
+            if idx > 0 and per_account_sleep_s > 0:
+                time.sleep(per_account_sleep_s)
+            try:
+                fakeid = resolve_fakeid(name, token, cookie, target_fakeid=None)
+            except Exception as exc:
+                print(f"[Skip] resolve_fakeid exception for {name}: {type(exc).__name__}: {exc}")
+                resolve_fakeid_fail += 1
+                fakeid = ""
         if not fakeid:
             if latest_url:
+                if idx > 0 and per_account_sleep_s > 0:
+                    time.sleep(per_account_sleep_s)
                 state_key = f"name:{name}" if name else f"url:{latest_url}"
                 headers_public = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
@@ -3006,11 +3070,24 @@ def run_push_latest_all(
                 per_account_payloads.append({"account": name, "fakeid": state_key, "url": url, "_fetched_article": fetched})
                 continue
 
+            resolve_fakeid_fail += 1
             print(f"[Skip] 无法解析 fakeid：{name}")
             continue
 
+        if idx > 0 and per_account_sleep_s > 0:
+            time.sleep(per_account_sleep_s)
+
         payload = _extract_latest_payload_for_account(fakeid=fakeid, account_name=name, token=token, cookie=cookie, headers=headers)
+        if isinstance(payload, dict) and payload.get("_error"):
+            err = str(payload["_error"]).strip()
+            if err.lower() == "freq_control" or "freq" in err.lower():
+                freq_control_hits += 1
+            else:
+                api_error_hits += 1
+            print(f"[Skip] 未获取到文章：{name or fakeid} (err={err})")
+            continue
         if not payload or not payload.get("url"):
+            api_error_hits += 1
             print(f"[Skip] 未获取到文章：{name or fakeid}")
             continue
 
@@ -3153,12 +3230,38 @@ def run_push_latest_all(
     for article in changed_articles:
         payload_articles.append({key: value for key, value in article.items() if not key.startswith("_")})
 
+    fetch_failed_accounts = freq_control_hits + api_error_hits + resolve_fakeid_fail
+    fetch_summary = {
+        "total_accounts": int(total_accounts),
+        "freq_control_hits": int(freq_control_hits),
+        "api_error_hits": int(api_error_hits),
+        "resolve_fakeid_fail": int(resolve_fakeid_fail),
+        "fetch_failed_accounts": int(fetch_failed_accounts),
+        "accounts_with_change": int(len(changed_articles or [])),
+        "per_account_sleep_s": float(per_account_sleep_s or 0),
+    }
+    freq_ratio = 0.0 if total_accounts <= 0 else float(freq_control_hits) / float(total_accounts)
+    fail_ratio = 0.0 if total_accounts <= 0 else float(fetch_failed_accounts) / float(total_accounts)
+    force_flag_env = str(os.environ.get("WECHAT_PUSH_LATEST_IGNORE_BATCH_FAILURE", "") or "").strip().lower()
+    ignore_failure = force_flag_env in {"1", "true", "yes", "on"}
+    if (not ignore_failure) and changed_articles and (freq_ratio >= 0.5 or fail_ratio >= 0.8):
+        raise RuntimeError(
+            "push_latest_all batch failure: "
+            + ", ".join([f"{k}={v}" for k, v in fetch_summary.items()])
+        )
+    if (not ignore_failure) and (not changed_articles) and fetch_failed_accounts > max(1, int(0.5 * total_accounts)):
+        raise RuntimeError(
+            "push_latest_all no articles with widespread failures: "
+            + ", ".join([f"{k}={v}" for k, v in fetch_summary.items()])
+        )
+
     payload_out = {
         "count": len(changed_articles),
         "articles": payload_articles,
         "batch_analysis": batch_analysis,
         "serverchan": push_result if push else {"ok": False, "skipped": True, "reason": "no_push"},
         "push_state_file": state_path,
+        "fetch_summary": fetch_summary,
     }
     try:
         analysis_cfg = get_analysis_config(config)
