@@ -3240,21 +3240,6 @@ def run_push_latest_all(
         "accounts_with_change": int(len(changed_articles or [])),
         "per_account_sleep_s": float(per_account_sleep_s or 0),
     }
-    freq_ratio = 0.0 if total_accounts <= 0 else float(freq_control_hits) / float(total_accounts)
-    fail_ratio = 0.0 if total_accounts <= 0 else float(fetch_failed_accounts) / float(total_accounts)
-    force_flag_env = str(os.environ.get("WECHAT_PUSH_LATEST_IGNORE_BATCH_FAILURE", "") or "").strip().lower()
-    ignore_failure = force_flag_env in {"1", "true", "yes", "on"}
-    if (not ignore_failure) and changed_articles and (freq_ratio >= 0.5 or fail_ratio >= 0.8):
-        raise RuntimeError(
-            "push_latest_all batch failure: "
-            + ", ".join([f"{k}={v}" for k, v in fetch_summary.items()])
-        )
-    if (not ignore_failure) and (not changed_articles) and fetch_failed_accounts > max(1, int(0.5 * total_accounts)):
-        raise RuntimeError(
-            "push_latest_all no articles with widespread failures: "
-            + ", ".join([f"{k}={v}" for k, v in fetch_summary.items()])
-        )
-
     payload_out = {
         "count": len(changed_articles),
         "articles": payload_articles,
@@ -3263,6 +3248,24 @@ def run_push_latest_all(
         "push_state_file": state_path,
         "fetch_summary": fetch_summary,
     }
+    freq_ratio = 0.0 if total_accounts <= 0 else float(freq_control_hits) / float(total_accounts)
+    fail_ratio = 0.0 if total_accounts <= 0 else float(fetch_failed_accounts) / float(total_accounts)
+    force_flag_env = str(os.environ.get("WECHAT_PUSH_LATEST_IGNORE_BATCH_FAILURE", "") or "").strip().lower()
+    ignore_failure = force_flag_env in {"1", "true", "yes", "on"}
+    failure_exit_code = 0
+    failure_reason = ""
+    if (not ignore_failure) and changed_articles and (freq_ratio >= 0.5 or fail_ratio >= 0.8):
+        failure_exit_code = 2
+        failure_reason = (
+            "push_latest_all batch failure: "
+            + ", ".join([f"{k}={v}" for k, v in fetch_summary.items()])
+        )
+    if (not ignore_failure) and (not changed_articles) and fetch_failed_accounts > max(1, int(0.5 * total_accounts)):
+        failure_exit_code = 2
+        failure_reason = (
+            "push_latest_all no articles with widespread failures: "
+            + ", ".join([f"{k}={v}" for k, v in fetch_summary.items()])
+        )
     try:
         analysis_cfg = get_analysis_config(config)
     except Exception:
@@ -3275,6 +3278,9 @@ def run_push_latest_all(
     ):
         _refresh_analysis_index_html(config)
     print(json.dumps(payload_out, ensure_ascii=False, indent=2))
+    if failure_exit_code:
+        print(f"[ERROR] {failure_reason}", file=sys.stderr)
+        sys.exit(failure_exit_code)
     return payload_out
 
 def run_extract_latest(config, account_name_arg=None, fakeid_arg=None, save_markdown=True, output_json_path=None, serverchan_sendkey=None, push=True):

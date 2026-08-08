@@ -200,7 +200,8 @@ def run_extract_latest(account: str) -> None:
     ]
     res = _run_live(cmd)
     if res.code != 0:
-        raise RuntimeError("抓取最新文章失败")
+        print("[ERROR] 抓取最新文章失败", file=sys.stderr)
+        sys.exit(res.code)
 
 
 def run_push_latest_all(accounts_file: str = "", force: bool = False) -> None:
@@ -216,7 +217,8 @@ def run_push_latest_all(accounts_file: str = "", force: bool = False) -> None:
         cmd.append("--force")
     res = _run_live(cmd)
     if res.code != 0:
-        raise RuntimeError("抓取并推送公众号清单最新文章失败")
+        print("[ERROR] 抓取并推送公众号清单最新文章失败", file=sys.stderr)
+        sys.exit(res.code)
 
 
 def _check_pkg_installed(pkg: str) -> bool:
