@@ -502,11 +502,18 @@ def main() -> int:
         title = "❌ WeChat-Article-Crawler Watchdog"
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         desp = f"时间: {now_str}\n\n" + _format_issue_lines(issues)
-        _log("WARN", f"issues={len(issues)}")
-        for it in issues:
-            _log("WARN", f"issue code={it.code} title={it.title}")
         codes = ",".join(sorted(set([it.code for it in issues if it.code])))
         dedupe_key = f"watchdog:summary:{codes}" if codes else "watchdog:summary"
+        should_emit_log, _ = _dedupe_should_send(
+            dedupe_key=f"log_emit:{codes}" if codes else "log_emit",
+            ttl_seconds=alert_ttl,
+        )
+        if should_emit_log:
+            _log("WARN", f"issues={len(issues)}")
+            for it in issues:
+                _log("WARN", f"issue code={it.code} title={it.title}")
+        else:
+            _log("INFO", f"issues={len(issues)} (same codes, dedupe log lines)")
         try:
             should_summary_write, age_write = _dedupe_should_send(
                 dedupe_key=f"write_summary:{codes}" if codes else "write_summary",

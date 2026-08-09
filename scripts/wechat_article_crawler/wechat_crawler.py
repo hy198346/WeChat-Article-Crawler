@@ -9,6 +9,7 @@ import sys
 import hashlib
 import subprocess
 import threading
+import random
 from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -3033,18 +3034,23 @@ def run_push_latest_all(
     _break_threshold = int(os.environ.get("WECHAT_GLOBAL_FREQ_BREAK_CONSECUTIVE", "8") or "8")
     if _break_threshold < 1:
         _break_threshold = 0
+    _error_break_threshold = int(os.environ.get("WECHAT_GLOBAL_ERROR_BREAK_CONSECUTIVE", "6") or "6")
+    if _error_break_threshold < 1:
+        _error_break_threshold = 0
     _consecutive_freq_streak = 0
+    _consecutive_error_streak = 0
     _global_freq_break_triggered = False
-    _reset_freq_streak = True
+    _global_error_break_triggered = False
+    _reset_streaks = True
 
     for idx, it in enumerate(accounts):
-        if _global_freq_break_triggered:
+        if _global_freq_break_triggered or _global_error_break_triggered:
             break
         name = (it.get("name") or "").strip()
         fakeid = (it.get("fakeid") or "").strip()
         latest_url = (it.get("latest_url") or "").strip()
         group = (it.get("group") or "未分组").strip()
-        _reset_freq_streak = True
+        _reset_streaks = True
         if latest_url:
             fakeid = ""
         elif not fakeid:
@@ -3056,6 +3062,8 @@ def run_push_latest_all(
                 print(f"[Skip] resolve_fakeid exception for {name}: {type(exc).__name__}: {exc}")
                 resolve_fakeid_fail += 1
                 processed_accounts += 1
+                _consecutive_freq_streak = 0
+                _consecutive_error_streak = 0
                 fakeid = ""
         if not fakeid:
             if latest_url:
@@ -3074,6 +3082,7 @@ def run_push_latest_all(
                 url = fetched.get("url") or latest_url
                 processed_accounts += 1
                 _consecutive_freq_streak = 0
+                _consecutive_error_streak = 0
                 last = state.get(state_key, {}) if isinstance(state.get(state_key), dict) else {}
                 last_url = last.get("last_pushed_url")
                 if (not force) and last_url and last_url == url:
@@ -3097,6 +3106,7 @@ def run_push_latest_all(
             resolve_fakeid_fail += 1
             processed_accounts += 1
             _consecutive_freq_streak = 0
+            _consecutive_error_streak = 0
             print(f"[Skip] 无法解析 fakeid：{name}")
             continue
 
@@ -3110,12 +3120,15 @@ def run_push_latest_all(
             if err.lower() == "freq_control" or "freq" in err.lower():
                 freq_control_hits += 1
                 _consecutive_freq_streak += 1
-                _reset_freq_streak = False
+                _consecutive_error_streak = 0
+                _reset_streaks = False
             else:
                 api_error_hits += 1
+                _consecutive_error_streak += 1
+                _consecutive_freq_streak = 0
             print(f"[Skip] 未获取到文章：{name or fakeid} (err={err})")
             if (
-                _reset_freq_streak is False
+                _reset_streaks is False
                 and _break_threshold > 0
                 and _consecutive_freq_streak >= _break_threshold
             ):
@@ -3123,13 +3136,31 @@ def run_push_latest_all(
                 print(
                     f"[GlobalFreqBreak] 最近连续 {_consecutive_freq_streak} 个账号均返回 freq_control，阈值={_break_threshold}，提前结束本次 run"
                 )
+            elif (
+                _error_break_threshold > 0
+                and _consecutive_error_streak >= _error_break_threshold
+            ):
+                _global_error_break_triggered = True
+                print(
+                    f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均返回非 freq 类错误（如代码异常/网络异常），阈值={_error_break_threshold}，提前结束本次 run"
+                )
             continue
         if not payload or not payload.get("url"):
             api_error_hits += 1
-            print(f"[Skip] 未获取到文章：{name or fakeid}")
+            _consecutive_error_streak += 1
             _consecutive_freq_streak = 0
+            print(f"[Skip] 未获取到文章：{name or fakeid}")
+            if (
+                _error_break_threshold > 0
+                and _consecutive_error_streak >= _error_break_threshold
+            ):
+                _global_error_break_triggered = True
+                print(
+                    f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均无文章返回（错误兜底），阈值={_error_break_threshold}，提前结束本次 run"
+                )
             continue
         _consecutive_freq_streak = 0
+        _consecutive_error_streak = 0
 
         last = state.get(fakeid, {}) if isinstance(state.get(fakeid), dict) else {}
         last_url = last.get("last_pushed_url")
@@ -3283,6 +3314,9 @@ def run_push_latest_all(
         "global_freq_break_triggered": bool(_global_freq_break_triggered),
         "global_freq_break_consecutive": int(_break_threshold or 0),
         "consecutive_freq_streak": int(_consecutive_freq_streak or 0),
+        "global_error_break_triggered": bool(_global_error_break_triggered),
+        "global_error_break_consecutive": int(_error_break_threshold or 0),
+        "consecutive_error_streak": int(_consecutive_error_streak or 0),
     }
     payload_out = {
         "count": len(changed_articles),
