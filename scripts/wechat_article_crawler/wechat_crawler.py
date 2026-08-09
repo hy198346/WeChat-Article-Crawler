@@ -627,6 +627,7 @@ def get_articles(fakeid, token, cookie, begin=0, count=5, *, max_retry: int = 3)
     retry = 0
     retryable_err = None
     base_wait_s = 1.2
+    jitter_ratio = 0.25
     while True:
         try:
             response = requests.get(url, headers=headers, params=params)
@@ -661,9 +662,11 @@ def get_articles(fakeid, token, cookie, begin=0, count=5, *, max_retry: int = 3)
                     is_retryable = is_freq or ret == -1 or "system" in err_msg or "timeout" in err_msg or "busy" in err_msg
                     if is_retryable and retry < max_retry:
                         retry += 1
-                        wait_s = base_wait_s * (2 ** (retry - 1))
+                        raw_wait_s = base_wait_s * (1.5 ** (retry - 1))
+                        jitter = raw_wait_s * jitter_ratio * random.uniform(-1.0, 1.0)
+                        wait_s = max(0.1, raw_wait_s + jitter)
                         hint = "freq_control" if is_freq else f"ret={ret}"
-                        print(f"[Retry #{retry}/{max_retry}] appmsgpublish {hint}, wait {wait_s:.1f}s before retry: fakeid={fakeid}")
+                        print(f"[Retry #{retry}/{max_retry}] appmsgpublish {hint}, wait {wait_s:.2f}s before retry: fakeid={fakeid}")
                         time.sleep(wait_s)
                         retryable_err = err_msg or f"ret={ret}"
                         continue
@@ -696,8 +699,10 @@ def get_articles(fakeid, token, cookie, begin=0, count=5, *, max_retry: int = 3)
         except requests.exceptions.RequestException as e:
             if retry < max_retry:
                 retry += 1
-                wait_s = base_wait_s * (2 ** (retry - 1))
-                print(f"[Retry #{retry}/{max_retry}] network error {type(e).__name__}: {e}, wait {wait_s:.1f}s: fakeid={fakeid}")
+                raw_wait_s = base_wait_s * (1.5 ** (retry - 1))
+                jitter = raw_wait_s * jitter_ratio * random.uniform(-1.0, 1.0)
+                wait_s = max(0.1, raw_wait_s + jitter)
+                print(f"[Retry #{retry}/{max_retry}] network error {type(e).__name__}: {e}, wait {wait_s:.2f}s: fakeid={fakeid}")
                 time.sleep(wait_s)
                 retryable_err = f"network:{type(e).__name__}"
                 continue
@@ -723,6 +728,7 @@ def search_accounts(query, token, cookie, begin=0, count=5, *, max_retry: int = 
 
     retry = 0
     base_wait_s = 1.0
+    jitter_ratio = 0.25
     while True:
         try:
             response = requests.get(url, headers=headers, params=params)
@@ -756,9 +762,11 @@ def search_accounts(query, token, cookie, begin=0, count=5, *, max_retry: int = 
                     is_retryable = is_freq or ret == -1 or "system" in err_msg or "timeout" in err_msg or "busy" in err_msg
                     if is_retryable and retry < max_retry:
                         retry += 1
-                        wait_s = base_wait_s * (2 ** (retry - 1))
+                        raw_wait_s = base_wait_s * (1.5 ** (retry - 1))
+                        jitter = raw_wait_s * jitter_ratio * random.uniform(-1.0, 1.0)
+                        wait_s = max(0.1, raw_wait_s + jitter)
                         hint = "freq_control" if is_freq else f"ret={ret}"
-                        print(f"[Retry #{retry}/{max_retry}] searchbiz {hint}, wait {wait_s:.1f}s before retry: query={query!r}")
+                        print(f"[Retry #{retry}/{max_retry}] searchbiz {hint}, wait {wait_s:.2f}s before retry: query={query!r}")
                         time.sleep(wait_s)
                         continue
                     print(f"API Error: {base}")
@@ -767,8 +775,10 @@ def search_accounts(query, token, cookie, begin=0, count=5, *, max_retry: int = 
         except requests.exceptions.RequestException as e:
             if retry < max_retry:
                 retry += 1
-                wait_s = base_wait_s * (2 ** (retry - 1))
-                print(f"[Retry #{retry}/{max_retry}] searchbiz network {type(e).__name__}: {e}, wait {wait_s:.1f}s: query={query!r}")
+                raw_wait_s = base_wait_s * (1.5 ** (retry - 1))
+                jitter = raw_wait_s * jitter_ratio * random.uniform(-1.0, 1.0)
+                wait_s = max(0.1, raw_wait_s + jitter)
+                print(f"[Retry #{retry}/{max_retry}] searchbiz network {type(e).__name__}: {e}, wait {wait_s:.2f}s: query={query!r}")
                 time.sleep(wait_s)
                 continue
             print(f"搜索公众号失败: {e}")
@@ -3012,18 +3022,29 @@ def run_push_latest_all(
             group_rank[g] = len(group_rank)
 
     total_accounts = len(accounts)
+    processed_accounts = 0
     freq_control_hits = 0
     api_error_hits = 0
     resolve_fakeid_fail = 0
-    per_account_sleep_s = float(os.environ.get("WECHAT_PUSH_LATEST_PER_ACCOUNT_SLEEP_S", "0.4") or "0.4")
+    per_account_sleep_s = float(os.environ.get("WECHAT_PUSH_LATEST_PER_ACCOUNT_SLEEP_S", "1.2") or "1.2")
     if per_account_sleep_s < 0:
         per_account_sleep_s = 0.0
 
+    _break_threshold = int(os.environ.get("WECHAT_GLOBAL_FREQ_BREAK_CONSECUTIVE", "8") or "8")
+    if _break_threshold < 1:
+        _break_threshold = 0
+    _consecutive_freq_streak = 0
+    _global_freq_break_triggered = False
+    _reset_freq_streak = True
+
     for idx, it in enumerate(accounts):
+        if _global_freq_break_triggered:
+            break
         name = (it.get("name") or "").strip()
         fakeid = (it.get("fakeid") or "").strip()
         latest_url = (it.get("latest_url") or "").strip()
         group = (it.get("group") or "未分组").strip()
+        _reset_freq_streak = True
         if latest_url:
             fakeid = ""
         elif not fakeid:
@@ -3034,6 +3055,7 @@ def run_push_latest_all(
             except Exception as exc:
                 print(f"[Skip] resolve_fakeid exception for {name}: {type(exc).__name__}: {exc}")
                 resolve_fakeid_fail += 1
+                processed_accounts += 1
                 fakeid = ""
         if not fakeid:
             if latest_url:
@@ -3050,6 +3072,8 @@ def run_push_latest_all(
                     account_name=name or None,
                 )
                 url = fetched.get("url") or latest_url
+                processed_accounts += 1
+                _consecutive_freq_streak = 0
                 last = state.get(state_key, {}) if isinstance(state.get(state_key), dict) else {}
                 last_url = last.get("last_pushed_url")
                 if (not force) and last_url and last_url == url:
@@ -3071,6 +3095,8 @@ def run_push_latest_all(
                 continue
 
             resolve_fakeid_fail += 1
+            processed_accounts += 1
+            _consecutive_freq_streak = 0
             print(f"[Skip] 无法解析 fakeid：{name}")
             continue
 
@@ -3078,18 +3104,32 @@ def run_push_latest_all(
             time.sleep(per_account_sleep_s)
 
         payload = _extract_latest_payload_for_account(fakeid=fakeid, account_name=name, token=token, cookie=cookie, headers=headers)
+        processed_accounts += 1
         if isinstance(payload, dict) and payload.get("_error"):
             err = str(payload["_error"]).strip()
             if err.lower() == "freq_control" or "freq" in err.lower():
                 freq_control_hits += 1
+                _consecutive_freq_streak += 1
+                _reset_freq_streak = False
             else:
                 api_error_hits += 1
             print(f"[Skip] 未获取到文章：{name or fakeid} (err={err})")
+            if (
+                _reset_freq_streak is False
+                and _break_threshold > 0
+                and _consecutive_freq_streak >= _break_threshold
+            ):
+                _global_freq_break_triggered = True
+                print(
+                    f"[GlobalFreqBreak] 最近连续 {_consecutive_freq_streak} 个账号均返回 freq_control，阈值={_break_threshold}，提前结束本次 run"
+                )
             continue
         if not payload or not payload.get("url"):
             api_error_hits += 1
             print(f"[Skip] 未获取到文章：{name or fakeid}")
+            _consecutive_freq_streak = 0
             continue
+        _consecutive_freq_streak = 0
 
         last = state.get(fakeid, {}) if isinstance(state.get(fakeid), dict) else {}
         last_url = last.get("last_pushed_url")
@@ -3233,12 +3273,16 @@ def run_push_latest_all(
     fetch_failed_accounts = freq_control_hits + api_error_hits + resolve_fakeid_fail
     fetch_summary = {
         "total_accounts": int(total_accounts),
+        "processed_accounts": int(processed_accounts),
         "freq_control_hits": int(freq_control_hits),
         "api_error_hits": int(api_error_hits),
         "resolve_fakeid_fail": int(resolve_fakeid_fail),
         "fetch_failed_accounts": int(fetch_failed_accounts),
         "accounts_with_change": int(len(changed_articles or [])),
         "per_account_sleep_s": float(per_account_sleep_s or 0),
+        "global_freq_break_triggered": bool(_global_freq_break_triggered),
+        "global_freq_break_consecutive": int(_break_threshold or 0),
+        "consecutive_freq_streak": int(_consecutive_freq_streak or 0),
     }
     payload_out = {
         "count": len(changed_articles),

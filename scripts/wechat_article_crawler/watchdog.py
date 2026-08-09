@@ -505,13 +505,23 @@ def main() -> int:
         _log("WARN", f"issues={len(issues)}")
         for it in issues:
             _log("WARN", f"issue code={it.code} title={it.title}")
-        try:
-            summary_path = _write_failure_summary(root, issues)
-            _log("WARN", f"failure_summary written path={summary_path}")
-        except Exception as e:
-            _log("WARN", f"failure_summary_write_failed error={e}")
         codes = ",".join(sorted(set([it.code for it in issues if it.code])))
         dedupe_key = f"watchdog:summary:{codes}" if codes else "watchdog:summary"
+        try:
+            should_summary_write, age_write = _dedupe_should_send(
+                dedupe_key=f"write_summary:{codes}" if codes else "write_summary",
+                ttl_seconds=alert_ttl,
+            )
+            if should_summary_write:
+                summary_path = _write_failure_summary(root, issues)
+                _log("WARN", f"failure_summary written path={summary_path}")
+            else:
+                _log(
+                    "INFO",
+                    f"failure_summary skipped(alert_ttl={alert_ttl}s, age_seconds={int(age_write)})",
+                )
+        except Exception as e:
+            _log("WARN", f"failure_summary_write_failed error={e}")
         _send_serverchan_once(title, desp, dedupe_key=dedupe_key, ttl_seconds=alert_ttl)
         wecom = (os.environ.get("WECOM_WEBHOOK_URL") or os.environ.get("WECOM_WEBHOOKURL") or os.environ.get("WECOM_WEBHOOK") or "").strip()
         if wecom:
