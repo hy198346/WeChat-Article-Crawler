@@ -129,10 +129,21 @@ if [ "${AUTH_EXPIRED_MAIN}" -eq 1 ]; then
   SESSION_COUNT=$(grep -Ec "$AUTH_MARKER_RE" "$LOG_FILE" || echo "1")
   alert_info_once "检测到 token/cookie 可能已失效（${SESSION_COUNT}处认证异常），将自动刷新并重试" "auth_expired_detected" "${WECHAT_AUTH_EXPIRED_ALERT_TTL_SECONDS:-21600}"
 
-  run_phase "refresh-only" env WECHAT_RUN_MODE="refresh-only" WECHAT_FORCE_REFRESH="1" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
-  if [ "$EXIT_CODE" -eq 0 ]; then
-    run_phase "main-retry" env WECHAT_RUN_MODE="push-latest-all" WECHAT_FORCE_REFRESH="0" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
-    AUTH_EXPIRED_FINAL="$PHASE_AUTH_EXPIRED"
+  if [ "${WECHAT_HEADLESS:-1}" = "1" ]; then
+    # headless 环境（launchd）里没有人能扫二维码；启动 Playwright/Chrome 只会等 15 分钟然后必失败，浪费时间并打乱下一次调度。
+    # 因此不再尝试启动浏览器刷新，直接保留 AUTH_EXPIRED_FINAL=1 让后续告警触发，提示在 Workspace Ops v2 里扫码。
+    AUTH_EXPIRED_FINAL=1
+    {
+      echo ""
+      echo "[launchd] refresh-only skip (headless): $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "[launchd] 提示：已检测到认证过期，但当前 WECHAT_HEADLESS=1（launchd 运行），为避免占用 15 分钟自动浏览器等待，已跳过启动 Chrome 刷新流程。请在 Workspace Ops v2 的 wechat → 『扫码登录』或『刷新 token/cookie』手动扫码登录。"
+    } >> "$LOG_FILE"
+  else
+    run_phase "refresh-only" env WECHAT_RUN_MODE="refresh-only" WECHAT_FORCE_REFRESH="1" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 0 ]; then
+      run_phase "main-retry" env WECHAT_RUN_MODE="push-latest-all" WECHAT_FORCE_REFRESH="0" /usr/bin/python3 "$ROOT/scripts/wechat_article_crawler/bootstrap_refresh_auth.py" || EXIT_CODE=$?
+      AUTH_EXPIRED_FINAL="$PHASE_AUTH_EXPIRED"
+    fi
   fi
 fi
 

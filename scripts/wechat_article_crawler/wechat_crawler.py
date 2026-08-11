@@ -654,7 +654,13 @@ def get_articles(fakeid, token, cookie, begin=0, count=5, *, max_retry: int = 3)
                 ret = int(base.get("ret") or 0)
                 if ret != 0:
                     err_msg = str(base.get("err_msg") or "").lower()
-                    if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
+                    is_auth_expired = (
+                        ("invalid session" in err_msg)
+                        or ("invalid" in err_msg and "session" in err_msg)
+                        or ret == 200002
+                        or ret == 200003
+                    )
+                    if is_auth_expired:
                         try:
                             _emit_auth_expired("base_resp_invalid_session", json.dumps(base, ensure_ascii=False))
                         except Exception:
@@ -672,6 +678,8 @@ def get_articles(fakeid, token, cookie, begin=0, count=5, *, max_retry: int = 3)
                         retryable_err = err_msg or f"ret={ret}"
                         continue
                     print(f"API Error: {base}")
+                    if is_auth_expired:
+                        return [], 0, "auth_expired"
                     return [], 0, "freq_control" if is_freq else None
 
             if "publish_page" in data:
@@ -754,7 +762,13 @@ def search_accounts(query, token, cookie, begin=0, count=5, *, max_retry: int = 
                 ret = int(base.get("ret") or 0)
                 if ret != 0:
                     err_msg = str(base.get("err_msg") or "").lower()
-                    if ("invalid session" in err_msg) or ("invalid" in err_msg and "session" in err_msg):
+                    is_auth_expired = (
+                        ("invalid session" in err_msg)
+                        or ("invalid" in err_msg and "session" in err_msg)
+                        or ret == 200002
+                        or ret == 200003
+                    )
+                    if is_auth_expired:
                         try:
                             _emit_auth_expired("base_resp_invalid_session_searchbiz", json.dumps(base, ensure_ascii=False))
                         except Exception:
@@ -771,7 +785,7 @@ def search_accounts(query, token, cookie, begin=0, count=5, *, max_retry: int = 
                         time.sleep(wait_s)
                         continue
                     print(f"API Error: {base}")
-                    return []
+                    return (None, "auth_expired") if is_auth_expired else []
             return data.get("list", [])
         except requests.exceptions.RequestException as e:
             if retry < max_retry:
@@ -794,8 +808,14 @@ def resolve_fakeid(target_account_name, token, cookie, target_fakeid=None):
     if not target_account_name:
         return None
 
-    candidates = search_accounts(target_account_name, token, cookie, begin=0, count=10)
+    res = search_accounts(target_account_name, token, cookie, begin=0, count=10)
+    if isinstance(res, tuple):
+        candidates = res[0] or []
+    else:
+        candidates = res or []
     if not candidates:
+        if isinstance(res, tuple) and len(res) > 1:
+            return ("", str(res[1]))
         return None
 
     exact = None
@@ -3026,6 +3046,7 @@ def run_push_latest_all(
     processed_accounts = 0
     freq_control_hits = 0
     api_error_hits = 0
+    auth_error_hits = 0
     resolve_fakeid_fail = 0
     per_account_sleep_s = float(os.environ.get("WECHAT_PUSH_LATEST_PER_ACCOUNT_SLEEP_S", "1.2") or "1.2")
     if per_account_sleep_s < 0:
@@ -3037,14 +3058,52 @@ def run_push_latest_all(
     _error_break_threshold = int(os.environ.get("WECHAT_GLOBAL_ERROR_BREAK_CONSECUTIVE", "6") or "6")
     if _error_break_threshold < 1:
         _error_break_threshold = 0
+    _auth_break_threshold = int(os.environ.get("WECHAT_GLOBAL_AUTH_BREAK_CONSECUTIVE", "3") or "3")
+    if _auth_break_threshold < 1:
+        _auth_break_threshold = 0
     _consecutive_freq_streak = 0
     _consecutive_error_streak = 0
+    _consecutive_auth_streak = 0
     _global_freq_break_triggered = False
     _global_error_break_triggered = False
+    _global_auth_break_triggered = False
     _reset_streaks = True
 
+    def _maybe_break():
+        nonlocal _global_freq_break_triggered, _global_error_break_triggered, _global_auth_break_triggered
+        if (
+            _reset_streaks is False
+            and _break_threshold > 0
+            and _consecutive_freq_streak >= _break_threshold
+            and not _global_freq_break_triggered
+        ):
+            _global_freq_break_triggered = True
+            print(
+                f"[GlobalFreqBreak] 最近连续 {_consecutive_freq_streak} 个账号均返回 freq_control，阈值={_break_threshold}，提前结束本次 run"
+            )
+        if (
+            _auth_break_threshold > 0
+            and _consecutive_auth_streak >= _auth_break_threshold
+            and not _global_auth_break_triggered
+        ):
+            _global_auth_break_triggered = True
+            print(
+                f"[GlobalAuthBreak] 最近连续 {_consecutive_auth_streak} 个账号均返回 ret=200002/200003 invalid_session（token/cookie 过期），"
+                f"阈值={_auth_break_threshold} 提前结束本次 run；请在 Workspace Ops v2 点 wechat → 『扫码登录』或『刷新 token/cookie』重新扫码登录。"
+            )
+        if (
+            _error_break_threshold > 0
+            and _consecutive_error_streak >= _error_break_threshold
+            and not _global_error_break_triggered
+            and not _global_auth_break_triggered
+        ):
+            _global_error_break_triggered = True
+            print(
+                f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均返回非 freq/非 auth 类错误（代码异常/网络异常），阈值={_error_break_threshold}，提前结束本次 run"
+            )
+
     for idx, it in enumerate(accounts):
-        if _global_freq_break_triggered or _global_error_break_triggered:
+        if _global_freq_break_triggered or _global_error_break_triggered or _global_auth_break_triggered:
             break
         name = (it.get("name") or "").strip()
         fakeid = (it.get("fakeid") or "").strip()
@@ -3057,14 +3116,35 @@ def run_push_latest_all(
             if idx > 0 and per_account_sleep_s > 0:
                 time.sleep(per_account_sleep_s)
             try:
-                fakeid = resolve_fakeid(name, token, cookie, target_fakeid=None)
+                rf_res = resolve_fakeid(name, token, cookie, target_fakeid=None)
             except Exception as exc:
                 print(f"[Skip] resolve_fakeid exception for {name}: {type(exc).__name__}: {exc}")
                 resolve_fakeid_fail += 1
                 processed_accounts += 1
                 _consecutive_freq_streak = 0
                 _consecutive_error_streak = 0
+                _consecutive_auth_streak = 0
                 fakeid = ""
+                rf_res = None
+            if isinstance(rf_res, tuple):
+                if len(rf_res) > 1 and str(rf_res[1]).strip():
+                    auth_err_code = str(rf_res[1]).strip()
+                    if "auth" in auth_err_code.lower() or "session" in auth_err_code.lower():
+                        auth_error_hits += 1
+                        _consecutive_auth_streak += 1
+                        _consecutive_error_streak = 0
+                        _consecutive_freq_streak = 0
+                        _reset_streaks = False
+                    else:
+                        resolve_fakeid_fail += 1
+                        _consecutive_error_streak += 1
+                        _consecutive_auth_streak = 0
+                        _consecutive_freq_streak = 0
+                processed_accounts += 1
+                fakeid = ""
+                _maybe_break()
+                continue
+            fakeid = rf_res or ""
         if not fakeid:
             if latest_url:
                 if idx > 0 and per_account_sleep_s > 0:
@@ -3083,6 +3163,7 @@ def run_push_latest_all(
                 processed_accounts += 1
                 _consecutive_freq_streak = 0
                 _consecutive_error_streak = 0
+                _consecutive_auth_streak = 0
                 last = state.get(state_key, {}) if isinstance(state.get(state_key), dict) else {}
                 last_url = last.get("last_pushed_url")
                 if (not force) and last_url and last_url == url:
@@ -3107,6 +3188,7 @@ def run_push_latest_all(
             processed_accounts += 1
             _consecutive_freq_streak = 0
             _consecutive_error_streak = 0
+            _consecutive_auth_streak = 0
             print(f"[Skip] 无法解析 fakeid：{name}")
             continue
 
@@ -3117,50 +3199,41 @@ def run_push_latest_all(
         processed_accounts += 1
         if isinstance(payload, dict) and payload.get("_error"):
             err = str(payload["_error"]).strip()
-            if err.lower() == "freq_control" or "freq" in err.lower():
+            err_l = err.lower()
+            if err_l == "auth_expired" or "auth" in err_l or "invalid_session" in err_l or "session" in err_l:
+                auth_error_hits += 1
+                _consecutive_auth_streak += 1
+                _consecutive_freq_streak = 0
+                _consecutive_error_streak = 0
+                _reset_streaks = False
+                print(f"[Skip] 未获取到文章：{name or fakeid} (err={err}) [token/cookie 已过期]")
+                _maybe_break()
+                continue
+            if err_l == "freq_control" or "freq" in err_l:
                 freq_control_hits += 1
                 _consecutive_freq_streak += 1
                 _consecutive_error_streak = 0
+                _consecutive_auth_streak = 0
                 _reset_streaks = False
             else:
                 api_error_hits += 1
                 _consecutive_error_streak += 1
                 _consecutive_freq_streak = 0
+                _consecutive_auth_streak = 0
             print(f"[Skip] 未获取到文章：{name or fakeid} (err={err})")
-            if (
-                _reset_streaks is False
-                and _break_threshold > 0
-                and _consecutive_freq_streak >= _break_threshold
-            ):
-                _global_freq_break_triggered = True
-                print(
-                    f"[GlobalFreqBreak] 最近连续 {_consecutive_freq_streak} 个账号均返回 freq_control，阈值={_break_threshold}，提前结束本次 run"
-                )
-            elif (
-                _error_break_threshold > 0
-                and _consecutive_error_streak >= _error_break_threshold
-            ):
-                _global_error_break_triggered = True
-                print(
-                    f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均返回非 freq 类错误（如代码异常/网络异常），阈值={_error_break_threshold}，提前结束本次 run"
-                )
+            _maybe_break()
             continue
         if not payload or not payload.get("url"):
             api_error_hits += 1
             _consecutive_error_streak += 1
             _consecutive_freq_streak = 0
+            _consecutive_auth_streak = 0
             print(f"[Skip] 未获取到文章：{name or fakeid}")
-            if (
-                _error_break_threshold > 0
-                and _consecutive_error_streak >= _error_break_threshold
-            ):
-                _global_error_break_triggered = True
-                print(
-                    f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均无文章返回（错误兜底），阈值={_error_break_threshold}，提前结束本次 run"
-                )
+            _maybe_break()
             continue
         _consecutive_freq_streak = 0
         _consecutive_error_streak = 0
+        _consecutive_auth_streak = 0
 
         last = state.get(fakeid, {}) if isinstance(state.get(fakeid), dict) else {}
         last_url = last.get("last_pushed_url")
@@ -3301,12 +3374,13 @@ def run_push_latest_all(
     for article in changed_articles:
         payload_articles.append({key: value for key, value in article.items() if not key.startswith("_")})
 
-    fetch_failed_accounts = freq_control_hits + api_error_hits + resolve_fakeid_fail
+    fetch_failed_accounts = freq_control_hits + api_error_hits + auth_error_hits + resolve_fakeid_fail
     fetch_summary = {
         "total_accounts": int(total_accounts),
         "processed_accounts": int(processed_accounts),
         "freq_control_hits": int(freq_control_hits),
         "api_error_hits": int(api_error_hits),
+        "auth_error_hits": int(auth_error_hits),
         "resolve_fakeid_fail": int(resolve_fakeid_fail),
         "fetch_failed_accounts": int(fetch_failed_accounts),
         "accounts_with_change": int(len(changed_articles or [])),
@@ -3317,6 +3391,9 @@ def run_push_latest_all(
         "global_error_break_triggered": bool(_global_error_break_triggered),
         "global_error_break_consecutive": int(_error_break_threshold or 0),
         "consecutive_error_streak": int(_consecutive_error_streak or 0),
+        "global_auth_break_triggered": bool(_global_auth_break_triggered),
+        "global_auth_break_consecutive": int(_auth_break_threshold or 0),
+        "consecutive_auth_streak": int(_consecutive_auth_streak or 0),
     }
     payload_out = {
         "count": len(changed_articles),
