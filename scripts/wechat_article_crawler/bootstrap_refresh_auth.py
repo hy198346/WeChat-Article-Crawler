@@ -166,7 +166,7 @@ def playwright_install_chromium_with_fallback() -> None:
         raise RuntimeError("playwright install chromium 失败（镜像与官方源均失败）")
 
 
-def run_refresh_auth(profile_dir: str, headless: bool, max_wait: int) -> None:
+def run_refresh_auth(profile_dir, headless, max_wait):
     cmd = [
         sys.executable,
         _crawler_script(),
@@ -189,6 +189,7 @@ def run_refresh_auth(profile_dir: str, headless: bool, max_wait: int) -> None:
     res = _run_live(cmd, timeout=max_wait + 60)
     if res.code != 0:
         raise RuntimeError("刷新 token/cookie 失败")
+    return _parse_last_auth_summary(res.stdout)
 
 
 def run_extract_latest(account: str) -> None:
@@ -238,7 +239,7 @@ from pathlib import Path
 
 
 
-def _print_auth_summary_payload(root: Path, *, ok: bool, updated: bool, error: str = "") -> None:
+def _print_auth_summary_payload(root, *, ok, updated, error=""):
     cfg_path = root / "config.json"
     token = ""
     cookie_present = False
@@ -266,6 +267,24 @@ def _print_auth_summary_payload(root: Path, *, ok: bool, updated: bool, error: s
     if error:
         payload["error"] = str(error)
     print(json.dumps(payload, ensure_ascii=False))
+    return payload
+
+
+def _parse_last_auth_summary(stdout_text):
+    if not stdout_text:
+        return None
+    lines = str(stdout_text).splitlines()
+    for line in reversed(lines):
+        s = line.strip()
+        if not s.startswith("{"):
+            continue
+        try:
+            obj = json.loads(s)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
 
 
 
@@ -353,12 +372,16 @@ def main() -> None:
 
     if need_refresh:
         print("step: refresh auth")
+        inner_summary = None
         try:
-            run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
+            inner_summary = run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
         except Exception as e:
             _print_auth_summary_payload(root, ok=False, updated=False, error=str(e))
             raise
-        _print_auth_summary_payload(root, ok=True, updated=True)
+        if isinstance(inner_summary, dict) and bool(inner_summary.get("ok")):
+            print(json.dumps(inner_summary, ensure_ascii=False))
+        else:
+            _print_auth_summary_payload(root, ok=True, updated=True)
 
     if run_mode == "extract-latest":
         print("step: extract latest")
