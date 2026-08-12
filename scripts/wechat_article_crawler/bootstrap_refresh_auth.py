@@ -2,6 +2,8 @@ import os
 import subprocess
 import sys
 import time
+import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -231,6 +233,41 @@ def _check_pkg_installed(pkg: str) -> bool:
 
 
 import re
+import json
+from pathlib import Path
+
+
+
+def _print_auth_summary_payload(root: Path, *, ok: bool, updated: bool, error: str = "") -> None:
+    cfg_path = root / "config.json"
+    token = ""
+    cookie_present = False
+    cookie_digest = ""
+    try:
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8")) or {}
+            token = str(cfg.get("token") or "")
+            cookie = str(cfg.get("cookie") or "")
+            cookie_present = bool(cookie)
+            if cookie_present and len(cookie) > 10:
+                cookie_digest = cookie[:4] + "…" + cookie[-4:]
+            elif cookie_present:
+                cookie_digest = cookie
+    except Exception:
+        pass
+    payload = {
+        "ok": bool(ok),
+        "updated": bool(updated),
+        "token": token,
+        "cookie_present": cookie_present,
+        "cookie_digest": cookie_digest,
+        "config_path": str(cfg_path),
+    }
+    if error:
+        payload["error"] = str(error)
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 
 def _check_all_deps_installed(requirements_path: Path) -> bool:
     """检查requirements.txt中的所有依赖是否已安装"""
@@ -316,7 +353,12 @@ def main() -> None:
 
     if need_refresh:
         print("step: refresh auth")
-        run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
+        try:
+            run_refresh_auth(profile_dir=profile_dir, headless=headless, max_wait=max_wait)
+        except Exception as e:
+            _print_auth_summary_payload(root, ok=False, updated=False, error=str(e))
+            raise
+        _print_auth_summary_payload(root, ok=True, updated=True)
 
     if run_mode == "extract-latest":
         print("step: extract latest")
@@ -327,6 +369,8 @@ def main() -> None:
         run_push_latest_all(accounts_file=accounts_file, force=force_push)
 
     if run_mode == "refresh-only":
+        if not need_refresh:
+            _print_auth_summary_payload(root, ok=True, updated=False)
         return
 
 

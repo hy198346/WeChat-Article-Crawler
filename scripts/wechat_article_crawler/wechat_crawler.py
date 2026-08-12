@@ -4142,6 +4142,23 @@ def main():
             sys.exit(1)
 
         if args.refresh_auth_only:
+            token = str(token or "")
+            cookie_hint = ""
+            if cookie:
+                cookie_hint = (str(cookie)[:4] + "…" + str(cookie)[-4:]) if len(str(cookie)) > 10 else str(cookie)
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "updated": True,
+                        "token": str(token or ""),
+                        "cookie_present": bool(cookie),
+                        "cookie_digest": cookie_hint,
+                        "config_path": CONFIG_FILE,
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return
 
     if args.article_url:
