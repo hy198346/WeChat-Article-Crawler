@@ -2739,20 +2739,36 @@ def push_articles_to_serverchan(config, articles, override_sendkey=None, batch_a
     return send_serverchan_message(sendkey, title, desp)
 
 
-def _update_push_state(state, state_path, changed_articles, pushed_fakeids):
-    if not pushed_fakeids:
-        return
+def _update_push_state(state, state_path, changed_articles, pushed_fakeids, *, run_meta=None):
     now_ts = int(time.time())
-    for a in changed_articles:
-        fid = a.get("fakeid")
-        if (not fid) or (fid not in pushed_fakeids):
-            continue
-        state[fid] = {
-            "last_pushed_url": a.get("url"),
-            "last_pushed_title": a.get("title"),
-            "last_pushed_published_at": a.get("published_at"),
-            "updated_at": now_ts,
-        }
+    if isinstance(run_meta, dict):
+        for k, v in run_meta.items():
+            if isinstance(k, str) and k.startswith("__run_"):
+                continue
+        for k in ("last_run_at", "last_success_at", "last_total_accounts", "last_processed_accounts",
+                  "last_freq_control_hits", "last_auth_error_hits", "last_api_error_hits",
+                  "last_resolve_fakeid_fail", "last_changed_count", "last_pushed_count",
+                  "last_run_rc", "last_freq_break_triggered", "last_auth_break_triggered",
+                  "last_error_break_triggered"):
+            if k in run_meta:
+                state[k] = run_meta[k]
+        state["last_run_at"] = state.get("last_run_at") or now_ts
+    pushed_any = 0
+    if pushed_fakeids:
+        for a in changed_articles or []:
+            fid = a.get("fakeid")
+            if (not fid) or (fid not in pushed_fakeids):
+                continue
+            state[fid] = {
+                "last_pushed_url": a.get("url"),
+                "last_pushed_title": a.get("title"),
+                "last_pushed_published_at": a.get("published_at"),
+                "updated_at": now_ts,
+            }
+            pushed_any += 1
+    if pushed_any:
+        state["last_push_at"] = now_ts
+        state["last_pushed_articles_count"] = pushed_any
     if state_path:
         save_json(state_path, state)
 
@@ -3048,19 +3064,22 @@ def run_push_latest_all(
     api_error_hits = 0
     auth_error_hits = 0
     resolve_fakeid_fail = 0
-    per_account_sleep_s = float(os.environ.get("WECHAT_PUSH_LATEST_PER_ACCOUNT_SLEEP_S", "1.2") or "1.2")
+    per_account_sleep_s = float(os.environ.get("WECHAT_PUSH_LATEST_PER_ACCOUNT_SLEEP_S", "2.2") or "2.2")
     if per_account_sleep_s < 0:
         per_account_sleep_s = 0.0
 
-    _break_threshold = int(os.environ.get("WECHAT_GLOBAL_FREQ_BREAK_CONSECUTIVE", "8") or "8")
+    _break_threshold = int(os.environ.get("WECHAT_GLOBAL_FREQ_BREAK_CONSECUTIVE", "24") or "24")
     if _break_threshold < 1:
         _break_threshold = 0
-    _error_break_threshold = int(os.environ.get("WECHAT_GLOBAL_ERROR_BREAK_CONSECUTIVE", "6") or "6")
+    _min_processed_before_freq_break = max(int(os.environ.get("WECHAT_GLOBAL_FREQ_BREAK_MIN_PROCESSED", "12") or "12"), 2)
+    _error_break_threshold = int(os.environ.get("WECHAT_GLOBAL_ERROR_BREAK_CONSECUTIVE", "12") or "12")
     if _error_break_threshold < 1:
         _error_break_threshold = 0
-    _auth_break_threshold = int(os.environ.get("WECHAT_GLOBAL_AUTH_BREAK_CONSECUTIVE", "3") or "3")
+    _min_processed_before_error_break = max(int(os.environ.get("WECHAT_GLOBAL_ERROR_BREAK_MIN_PROCESSED", "10") or "10"), 2)
+    _auth_break_threshold = int(os.environ.get("WECHAT_GLOBAL_AUTH_BREAK_CONSECUTIVE", "5") or "5")
     if _auth_break_threshold < 1:
         _auth_break_threshold = 0
+    _min_processed_before_auth_break = max(int(os.environ.get("WECHAT_GLOBAL_AUTH_BREAK_MIN_PROCESSED", "6") or "6"), 2)
     _consecutive_freq_streak = 0
     _consecutive_error_streak = 0
     _consecutive_auth_streak = 0
@@ -3074,32 +3093,38 @@ def run_push_latest_all(
         if (
             _reset_streaks is False
             and _break_threshold > 0
+            and processed_accounts >= _min_processed_before_freq_break
             and _consecutive_freq_streak >= _break_threshold
             and not _global_freq_break_triggered
         ):
             _global_freq_break_triggered = True
             print(
-                f"[GlobalFreqBreak] 最近连续 {_consecutive_freq_streak} 个账号均返回 freq_control，阈值={_break_threshold}，提前结束本次 run"
+                f"[GlobalFreqBreak] 最近连续 {_consecutive_freq_streak} 个账号均返回 freq_control，阈值={_break_threshold}，"
+                f"已处理账号={processed_accounts}（≥ min={_min_processed_before_freq_break}），提前结束本次 run"
             )
         if (
             _auth_break_threshold > 0
+            and processed_accounts >= _min_processed_before_auth_break
             and _consecutive_auth_streak >= _auth_break_threshold
             and not _global_auth_break_triggered
         ):
             _global_auth_break_triggered = True
             print(
                 f"[GlobalAuthBreak] 最近连续 {_consecutive_auth_streak} 个账号均返回 ret=200002/200003 invalid_session（token/cookie 过期），"
-                f"阈值={_auth_break_threshold} 提前结束本次 run；请在 Workspace Ops v2 点 wechat → 『扫码登录』或『刷新 token/cookie』重新扫码登录。"
+                f"阈值={_auth_break_threshold}，已处理账号={processed_accounts}（≥ min={_min_processed_before_auth_break}），"
+                f"提前结束本次 run；请在 Workspace Ops v2 点 wechat → 『扫码登录』或『刷新 token/cookie』重新扫码登录。"
             )
         if (
             _error_break_threshold > 0
+            and processed_accounts >= _min_processed_before_error_break
             and _consecutive_error_streak >= _error_break_threshold
             and not _global_error_break_triggered
             and not _global_auth_break_triggered
         ):
             _global_error_break_triggered = True
             print(
-                f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均返回非 freq/非 auth 类错误（代码异常/网络异常），阈值={_error_break_threshold}，提前结束本次 run"
+                f"[GlobalErrorBreak] 最近连续 {_consecutive_error_streak} 个账号均返回非 freq/非 auth 类错误（代码异常/网络异常），"
+                f"阈值={_error_break_threshold}，已处理账号={processed_accounts}（≥ min={_min_processed_before_error_break}），提前结束本次 run"
             )
 
     for idx, it in enumerate(accounts):
@@ -3307,7 +3332,6 @@ def run_push_latest_all(
                         pushed_fakeids.add(a["fakeid"])
     if push and (not changed_articles):
         push_result = {"ok": True, "skipped": True, "reason": "no_change"}
-    _update_push_state(state, state_path, changed_articles, pushed_fakeids)
 
     batch_analysis = None
     if changed_articles:
@@ -3388,12 +3412,15 @@ def run_push_latest_all(
         "global_freq_break_triggered": bool(_global_freq_break_triggered),
         "global_freq_break_consecutive": int(_break_threshold or 0),
         "consecutive_freq_streak": int(_consecutive_freq_streak or 0),
+        "global_freq_break_min_processed": int(_min_processed_before_freq_break or 0),
         "global_error_break_triggered": bool(_global_error_break_triggered),
         "global_error_break_consecutive": int(_error_break_threshold or 0),
         "consecutive_error_streak": int(_consecutive_error_streak or 0),
+        "global_error_break_min_processed": int(_min_processed_before_error_break or 0),
         "global_auth_break_triggered": bool(_global_auth_break_triggered),
         "global_auth_break_consecutive": int(_auth_break_threshold or 0),
         "consecutive_auth_streak": int(_consecutive_auth_streak or 0),
+        "global_auth_break_min_processed": int(_min_processed_before_auth_break or 0),
     }
     payload_out = {
         "count": len(changed_articles),
@@ -3432,6 +3459,35 @@ def run_push_latest_all(
         and not (push and changed_articles)
     ):
         _refresh_analysis_index_html(config)
+    now_ts = int(time.time())
+    push_ok = (
+        push and push_result and isinstance(push_result, dict)
+        and bool(push_result.get("ok")) and not bool(push_result.get("skipped"))
+    )
+    run_meta = {
+        "last_run_at": now_ts,
+        "last_run_rc": int(failure_exit_code or 0),
+        "last_success_at": now_ts if not failure_exit_code else (state.get("last_success_at") if isinstance(state, dict) else None),
+        "last_total_accounts": int(total_accounts or 0),
+        "last_processed_accounts": int(processed_accounts or 0),
+        "last_freq_control_hits": int(freq_control_hits or 0),
+        "last_auth_error_hits": int(auth_error_hits or 0),
+        "last_api_error_hits": int(api_error_hits or 0),
+        "last_resolve_fakeid_fail": int(resolve_fakeid_fail or 0),
+        "last_changed_count": int(len(changed_articles or [])),
+        "last_pushed_count": int(payload_out["count"] if push_ok else 0),
+        "last_freq_break_triggered": bool(_global_freq_break_triggered),
+        "last_auth_break_triggered": bool(_global_auth_break_triggered),
+        "last_error_break_triggered": bool(_global_error_break_triggered),
+        "last_serverchan_push_ok": bool(push_ok),
+        "last_serverchan_skipped": bool(push_result and isinstance(push_result, dict) and bool(push_result.get("skipped"))),
+        "last_serverchan_skip_reason": str((push_result or {}).get("reason") or "") if isinstance(push_result, dict) else "",
+    }
+    try:
+        _update_push_state(state, state_path, changed_articles, pushed_fakeids, run_meta=run_meta)
+    except Exception as _us_exc:
+        print(f"[WARN] _update_push_state run_meta failed: {type(_us_exc).__name__}: {_us_exc}", file=sys.stderr)
+    payload_out["run_meta"] = run_meta
     print(json.dumps(payload_out, ensure_ascii=False, indent=2))
     if failure_exit_code:
         print(f"[ERROR] {failure_reason}", file=sys.stderr)
